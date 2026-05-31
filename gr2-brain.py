@@ -701,7 +701,115 @@ async def main():
                     state.log(f"     → FAILED: {e.code} {body}")
 
     # ─────────────────────────────────────────────────
-    # 2c. CRAFTING & MATERIALS
+    # 2c. AUCTION HOUSE
+    # ─────────────────────────────────────────────────
+    state.log("")
+    state.log("═" * 50)
+    state.log("AUCTION HOUSE")
+    state.log("─" * 50)
+
+    # Fetch active listings
+    ah_listings = []
+    try:
+        ah_data = api_get('/api/auction/listings', state.token)
+        ah_listings = ah_data.get('listings', ah_data if isinstance(ah_data, list) else [])
+    except Exception:
+        pass
+
+    # Check AH prices for items we care about
+    tracked_items = {
+        "Oak Staff": {"itemId": 86,  "shop_price": 137659, "slot": "weapon"},
+        "Arcane Staff": {"itemId": 87, "shop_price": 275318, "slot": "weapon"},
+        "Silver Ring": {"itemId": 111, "shop_price": 19034, "slot": "ring1"},
+        "Silver Amulet": {"itemId": 110, "shop_price": 18072, "slot": "amulet"},
+        "Iron Shield": {"itemId": 94, "shop_price": 27800, "slot": "shield"},
+        "Steel Plate": {"itemId": None, "shop_price": 37000, "slot": "armor"},
+        "Hardened Boots": {"itemId": 104, "shop_price": 22000, "slot": "boots"},
+        "Hardened Tunic": {"itemId": 101, "shop_price": 37000, "slot": "body"},
+    }
+
+    ah_deals = []
+    for l in ah_listings:
+        iname = l.get('itemName', '')
+        price = l.get('pricePerUnit', 0)
+        listing_id = l['id']
+        qty = l.get('quantity', 1)
+        seller = l.get('characterName', '?')
+
+        tracked = tracked_items.get(iname)
+        if tracked and tracked['shop_price']:
+            savings = tracked['shop_price'] - price
+            pct = int((1 - price / tracked['shop_price']) * 100)
+            if savings > 0:
+                ah_deals.append({
+                    "name": iname, "price": price, "listing_id": listing_id,
+                    "savings": savings, "pct": pct, "qty": qty, "seller": seller,
+                    "shop_price": tracked['shop_price'], "item_id": tracked['itemId']
+                })
+
+    if ah_deals:
+        ah_deals.sort(key=lambda x: -x['savings'])
+        state.log(f"  🏷️  Deals found (cheaper than NPC shop):")
+        for d in ah_deals[:5]:
+            state.log(f"     {d['name']} — {d['price']:,}g ({d['pct']}% off NPC, save {d['savings']:,}g) — {d['seller']}")
+            # Auto-buy if >30% off NPC and we need it (check which chars could use it)
+            if d['pct'] >= 30:
+                for c in chars:
+                    cid = c['id']
+                    cname = c['name']
+                    cgold = c.get('gold', 0)
+                    cls = c.get('class', '?')
+                    if cgold >= d['price']:
+                        # Check if char would benefit
+                        benefit = False
+                        if d['name'] == 'Oak Staff' and cls == 'wizard':
+                            wpn = c.get('_weapon_stats', {})
+                            if wpn.get('m_atk', 0) < 32:
+                                benefit = True
+                        elif d['name'] == 'Arcane Staff' and cls == 'wizard':
+                            wpn = c.get('_weapon_stats', {})
+                            if wpn.get('m_atk', 0) < 55 and wpn.get('m_atk', 0) >= 14:
+                                benefit = True
+                        elif d['name'] in ['Silver Ring', 'Silver Amulet']:
+                            benefit = True  # Everyone can use accessories
+
+                        if benefit:
+                            state.log(f"       → Buying for {cname} ({d['price']:,}g)!")
+                            try:
+                                result = api_post('/api/auction/buy',
+                                    {"characterId": cid, "listingId": d['listing_id'], "quantity": 1},
+                                    state.token)
+                                state.log(f"       → {json.dumps(result)}")
+                            except urllib.request.HTTPError as e:
+                                state.log(f"       → FAILED: {e.code} {e.read().decode()[:100]}")
+                            break  # Buy 1 per cycle
+    else:
+        state.log(f"  No tracked items on AH cheaper than NPC shop")
+
+    # Collect pickups for all characters
+    state.log("  ─")
+    for c in chars:
+        cid = c['id']
+        cname = c['name']
+        try:
+            picks = api_get(f'/api/auction/pickups?characterId={cid}', state.token)
+            if picks:
+                for p in picks:
+                    pid = p.get('id', p.get('pickupId'))
+                    iname = p.get('itemName', 'item')
+                    qty = p.get('quantity', 1)
+                    if not p.get('collected', False):
+                        state.log(f"  📦 {cname}: Collecting {iname} x{qty} from AH")
+                        try:
+                            result = api_post(f'/api/auction/collect/{pid}', {"characterId": cid}, state.token)
+                            state.log(f"     → {json.dumps(result)[:100]}")
+                        except urllib.request.HTTPError as e:
+                            state.log(f"     → FAILED: {e.code}")
+        except Exception:
+            pass
+
+    # ─────────────────────────────────────────────────
+    # 2d. CRAFTING & MATERIALS
     # ─────────────────────────────────────────────────
     state.log("")
     state.log("═" * 50)
@@ -948,6 +1056,8 @@ async def main():
     for c in chars:
         cid = c['id']
         name = c['name']
+        lv = c['level']
+        zid = c['currentZoneId']
         try:
             active = api_get(f'/api/quests/active?characterId={cid}', state.token)
             available = api_get(f'/api/quests/available?characterId={cid}', state.token)
@@ -962,12 +1072,31 @@ async def main():
                 pg = entry.get('progress', {})
                 si = entry.get('stageInfo', {})
                 qname = qd.get('name', '?')
+                qid = qd.get('id')
+                qstate = pg.get('state', 0)
                 stage = si.get('label', 'Unknown stage')
                 target_zones = si.get('targetZoneIds', [])
                 tz_names = [state.get_zone_name(z) for z in target_zones]
                 state.log(f"  📋 {name}: «{qname}» — {stage}")
                 if tz_names:
                     state.log(f"       Zone: {', '.join(tz_names)}")
+
+                # Auto-advance quest if in target zone
+                if target_zones and zid in target_zones and 'party' not in qname.lower():
+                    state.log(f"     🎯 In target zone! Advancing quest...")
+                    try:
+                        adv = api_post(f'/api/quests/{qid}/advance', {"characterId": cid}, state.token)
+                        state.log(f"     → {json.dumps(adv)[:200]}")
+                        if adv.get('status') == 'ok' or adv.get('completed'):
+                            # Try to complete
+                            comp = api_post(f'/api/quests/{qid}/complete', {"characterId": cid}, state.token)
+                            state.log(f"     → Complete: {json.dumps(comp)[:200]}")
+                            if comp.get('status') == 'ok':
+                                claim = api_post(f'/api/quests/{qid}/claim', {"characterId": cid}, state.token)
+                                state.log(f"     → Reward: {json.dumps(claim)[:200]}")
+                    except urllib.request.HTTPError as e:
+                        body = e.read().decode()[:100]
+                        state.log(f"     → {e.code}: {body}")
         else:
             state.log(f"  {name}: no active quests")
 
@@ -1028,6 +1157,101 @@ async def main():
         state.log(f"     💡 Form party when ready to boss together (WS commands: party:invite + party:accept)")
     else:
         state.log(f"  No party quests active (all solo farming)")
+
+    # ══════════════════════════════════════════════
+    # 6. BOSS & RAID TRACKING
+    # ══════════════════════════════════════════════
+    state.log("")
+    state.log("═" * 50)
+    state.log("BOSSES & RAIDS")
+    state.log("─" * 50)
+    state.log(f"  No boss tracking active (all chars below Lv20 raid thresholds)")
+    state.log(f"  Key targets at Lv20+: Old Pirate → Arcane Staff (55 M.Atk, 0.25%)")
+    state.log(f"  Vaeldris the Ruinbound → Mithril Stiletto (54 P.Atk, 12%)")
+    state.log(f"  Need to form a party manually for raid bosses (auto-farm breaks in party)")
+
+    # ══════════════════════════════════════════════
+    # 7. ASCENDANCY CHECK (Lv20+)
+    # ══════════════════════════════════════════════
+    state.log("")
+    state.log("═" * 50)
+    state.log("ASCENDANCY")
+    state.log("─" * 50)
+
+    for c in chars:
+        cid = c['id']
+        name = c['name']
+        lv = c['level']
+        cls = c.get('class', '?')
+        if lv >= 20:
+            state.log(f"  ⬆️ {name} Lv{lv} {cls} — eligible for ascendancy!")
+            try:
+                options = api_get(f'/api/ascendancy/options?characterId={cid}', state.token)
+                state.log(f"     Options: {json.dumps(options)[:300]}")
+                # Auto-ascend to recommended path
+                if isinstance(options, list) and options:
+                    best = options[0]
+                    aid = best.get('id', best.get('ascendancyId'))
+                    aname = best.get('name', '?')
+                    state.log(f"     Ascending to {aname}...")
+                    result = api_post('/api/ascendancy/ascend', {"characterId": cid, "ascendancyId": aid}, state.token)
+                    state.log(f"     → {json.dumps(result)[:200]}")
+            except urllib.request.HTTPError as e:
+                body = e.read().decode()[:100]
+                state.log(f"     → {e.code}: {body}")
+        else:
+            state.log(f"  {name} Lv{lv} — needs {20-lv} more levels")
+
+    # ══════════════════════════════════════════════
+    # 8. BAG MANAGEMENT
+    # ══════════════════════════════════════════════
+    state.log("")
+    state.log("═" * 50)
+    state.log("BAG MANAGEMENT")
+    state.log("─" * 50)
+
+    for c in chars:
+        cid = c['id']
+        name = c['name']
+        bag = c.get('_inv', {}).get('bag', [])
+        equipped = c.get('_equipped', {})
+
+        if len(bag) > 15:
+            state.log(f"  📦 {name}: {len(bag)} items in bag (getting full)")
+            # Find duplicates worth selling
+            dupes = {}
+            for item in bag:
+                iname = item.get('itemName', '?')
+                islot = item.get('itemSlot', '?')
+                qty = item.get('quantity', 1)
+                if qty > 1 and islot not in ['potion', 'scroll']:
+                    dupes[iname] = dupes.get(iname, 0) + qty
+                elif qty == 1:
+                    # Single items — check if we already have one equipped or in another slot
+                    key = f"{iname}_{islot}"
+                    dupes[key] = dupes.get(key, 0) + 1
+
+            for item_name, count in dupes.items():
+                if count > 1:
+                    sell_count = count - 1  # Keep 1
+                    state.log(f"     💰 {sell_count}× duplicate {item_name} — could sell")
+                    # Find the actual item to sell
+                    for item in bag:
+                        base_name = item.get('itemName', '?')
+                        qty = item.get('quantity', 1)
+                        if base_name == item_name.replace(f'_{item.get("itemSlot", "?")}', '') and qty > 1:
+                            # Try to sell to NPC
+                            try:
+                                slot = item.get('equippedSlot', 'bag')
+                                result = api_post(f'/api/shop/8/sell',
+                                    {"characterId": cid, "inventorySlot": slot, "quantity": qty - 1},
+                                    state.token)
+                                state.log(f"       Sold {qty-1}× to NPC: {json.dumps(result)[:100]}")
+                            except Exception:
+                                pass
+                            break
+        else:
+            state.log(f"  ✅ {name}: {len(bag)} items in bag (room available)")
 
     state.log("")
     state.log("═" * 50)
