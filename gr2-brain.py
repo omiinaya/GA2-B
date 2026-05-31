@@ -69,17 +69,46 @@ PROGRESSION = [
 # Recommended weapon upgrades per class
 WEAPON_TREE = {
     "wizard": [
-        {"name": "Wooden Staff",  "matk": 14, "price": 11472,  "source": "shop",     "min_lv": 0},
-        {"name": "Oak Staff",     "matk": 32, "price": 137659, "source": "shop",     "min_lv": 5},
-        {"name": "Arcane Staff",  "matk": 55, "price": 275318, "source": "shop/old pirate", "min_lv": 15},
-        {"name": "Crystal-Woven Staff", "matk": 80, "price": 250000, "source": "craft/marshland toad", "min_lv": 20},
-        {"name": "Archmage's Staff",    "matk": 110, "price": 500000, "source": "craft", "min_lv": 30},
+        {"name": "Wooden Staff",       "matk": 14,  "price": 11472,   "source": "shop",           "min_lv": 0},
+        {"name": "Oak Staff",          "matk": 32,  "price": 137659,  "source": "shop",           "min_lv": 5},
+        {"name": "Arcane Staff",       "matk": 55,  "price": 275318,  "source": "shop/old pirate", "min_lv": 15},
+        {"name": "Crystal-Woven Staff","matk": 80,  "price": 250000,  "source": "craft/marshland toad", "min_lv": 20},
+        {"name": "Archmage's Staff",   "matk": 110, "price": 500000,  "source": "craft",           "min_lv": 30},
+        {"name": "Eldritch Staff",     "matk": 143, "price": 8000000, "source": "craft (8M)",       "min_lv": 40},
+        {"name": "Abyssal Staff",      "matk": 180, "price": 15000000,"source": "craft (15M)",      "min_lv": 50},
     ],
     "fighter": [
-        {"name": "Short Sword",   "patk": 12, "price": 12964,  "source": "shop",     "min_lv": 0},
-        {"name": "Broad Sword",   "patk": 28, "price": 151242, "source": "shop",     "min_lv": 5},
-        {"name": "Knight's Sword", "patk": 48, "price": 302484, "source": "shop",    "min_lv": 15},
-        {"name": "Mithril Longsword", "patk": 72, "price": 0,   "source": "bandit scout 0.03%", "min_lv": 23},
+        {"name": "Short Sword",        "patk": 12,  "price": 12964,   "source": "shop",           "min_lv": 0},
+        {"name": "Broad Sword",        "patk": 28,  "price": 151242,  "source": "shop",           "min_lv": 5},
+        {"name": "Knight's Sword",     "patk": 48,  "price": 302484,  "source": "shop",           "min_lv": 15},
+        {"name": "Mithril Longsword",  "patk": 72,  "price": 250000,  "source": "craft/bandit scout",   "min_lv": 23},
+        {"name": "Runic Blade",        "patk": 96,  "price": 500000,  "source": "craft",           "min_lv": 28},
+        {"name": "Eldritch Blade",     "patk": 125, "price": 8000000, "source": "craft (8M)",       "min_lv": 40},
+        {"name": "Abyssal Blade",      "patk": 158, "price": 15000000,"source": "craft (15M)",      "min_lv": 50},
+    ],
+}
+
+# Armor progression by class — tracks equipped set vs recommended upgrades
+ARMOR_TREE = {
+    "wizard": [
+        {"name": "Apprentice Set",     "mdef": 6,  "pdef": 5,  "price": 0,     "source": "starter",      "min_lv": 0},
+        {"name": "Silk Set",           "mdef": 16, "pdef": 23, "price": 120000,"source": "shop/drops",    "min_lv": 5},
+        {"name": "Mithril Robe Set",   "mdef": 31, "pdef": 36, "price": 150000,"source": "craft/raids",  "min_lv": 20, "bonus": "+300 MP, +1 INT, +10% M.Atk"},
+        {"name": "Karmian Set",        "mdef": 45, "pdef": 50, "price": 3000000,"source": "craft/ Sylvara","min_lv": 40, "bonus": "+600 MP, +2 INT, +10% M.Def"},
+        {"name": "Demon Set",          "mdef": 45, "pdef": 50, "price": 3000000,"source": "craft/ Sylvara","min_lv": 40, "bonus": "+15% M.Atk, +3 INT, +2 WIT"},
+    ],
+    "fighter": [
+        {"name": "Leather Set",        "pdef": 8,  "mdef": 6,  "price": 0,     "source": "starter",      "min_lv": 0},
+        {"name": "Hardened Set",       "pdef": 31, "mdef": 16, "price": 120000,"source": "shop/drops",    "min_lv": 5},
+        {"name": "Manticore Set",      "pdef": 49, "mdef": 31, "price": 150000,"source": "craft/raids",  "min_lv": 20, "bonus": "+200 MP, +1 DEX, +5% Eva, +5% Atk.Spd"},
+        {"name": "Plated Leather Set", "pdef": 67, "mdef": 45, "price": 3000000,"source": "craft/ Sylvara","min_lv": 40, "bonus": "+300 HP, +2 STR, +10% P.Atk, +5% P.Def"},
+        {"name": "Theca Set",          "pdef": 67, "mdef": 45, "price": 3000000,"source": "craft/ Sylvara","min_lv": 40, "bonus": "+400 MP, +2 DEX, +10% Eva, +10% Atk.Spd"},
+    ],
+    "tank": [
+        {"name": "Steel Set",          "pdef": 37, "mdef": 16, "price": 120000,"source": "shop/drops",    "min_lv": 5},
+        {"name": "Brigandine Set",     "pdef": 67, "mdef": 31, "price": 460000,"source": "craft",         "min_lv": 20},
+        {"name": "Chain Mail Set",     "pdef": 95, "mdef": 45, "price": 9200000,"source": "craft",        "min_lv": 40},
+        {"name": "Composite Set",      "pdef": 95, "mdef": 45, "price": 9200000,"source": "craft",        "min_lv": 40},
     ],
 }
 
@@ -237,6 +266,14 @@ class State:
         else:
             return [w for w in tree if w.get('patk', 0) > current_patk and w['min_lv'] <= min_lv]
 
+    def find_armor_upgrade(self, char_class, current_pdef=0, current_mdef=0, min_lv=0):
+        """Find next armor set upgrade. Returns list of upgrades sorted by pdef."""
+        tree = ARMOR_TREE.get(char_class, [])
+        if char_class == 'tank':
+            return [a for a in tree if a.get('pdef', 0) > current_pdef and a['min_lv'] <= min_lv]
+        else:
+            return [a for a in tree if a.get('pdef', 0) > current_pdef and a['min_lv'] <= min_lv]
+
 
 # === WS COMMAND ===
 async def ws_travel(token, char_id, target_zone, timeout=45):
@@ -366,6 +403,44 @@ async def main():
         c['_weapon'] = wpn_name
         c['_weapon_stats'] = wpn_stats
 
+        # Compute armor stats from equipped pieces
+        armor_stats = {"pdef": 0, "mdef": 0, "count": 0}
+        for slot_name in ['body', 'legs', 'head', 'gloves', 'boots']:
+            piece = equipped_slots.get(slot_name, {})
+            if piece and piece.get('statsJson'):
+                try:
+                    ps = json.loads(piece['statsJson'])
+                    armor_stats['pdef'] += ps.get('p_def', 0)
+                    armor_stats['mdef'] += ps.get('m_def', 0)
+                    armor_stats['count'] += 1
+                except Exception:
+                    pass
+        c['_armor_stats'] = armor_stats
+
+        # Determine effective armor set name
+        body_piece = equipped_slots.get('body', {})
+        body_name = body_piece.get('itemName', '')
+        if 'apprentice' in body_name.lower():
+            c['_armor_set'] = 'Apprentice'
+        elif 'silk' in body_name.lower():
+            c['_armor_set'] = 'Silk'
+        elif 'mithril' in body_name.lower() and 'robe' in body_name.lower():
+            c['_armor_set'] = 'Mithril Robe'
+        elif 'hardened' in body_name.lower():
+            c['_armor_set'] = 'Hardened'
+        elif 'manticore' in body_name.lower():
+            c['_armor_set'] = 'Manticore'
+        elif 'steel' in body_name.lower():
+            c['_armor_set'] = 'Steel'
+        elif 'brigandine' in body_name.lower():
+            c['_armor_set'] = 'Brigandine'
+        elif 'chain mail' in body_name.lower() or 'chain' in body_name.lower():
+            c['_armor_set'] = 'Chain Mail'
+        elif 'leather' in body_name.lower():
+            c['_armor_set'] = 'Leather'
+        else:
+            c['_armor_set'] = body_name.split(' ')[0] if body_name else 'Mixed'
+
         # Status line
         status_icon = '☠️' if dead else ('⚙️' if af else '🛑')
         hp_str = f"{hp}/{mhp}"
@@ -399,6 +474,11 @@ async def main():
             acc_parts.append(f"📿{amulet.get('itemName','?')}")
         if acc_parts:
             state.log(f"     {' '.join(acc_parts)}")
+
+        # Armor line
+        armor_set = c.get('_armor_set', '?')
+        astats = c.get('_armor_stats', {})
+        state.log(f"     🛡️ {armor_set} set (P.Def {astats.get('pdef',0)}, M.Def {astats.get('mdef',0)})")
 
     state.log(f"\n💰 TOTAL GOLD: {state.total_gold:,}g")
 
@@ -569,6 +649,34 @@ async def main():
             state.log(f"  💡 Silver Ring ({bonus}, ~19K) — open ring slot")
         if not amulet_filled:
             state.log(f"  💡 Silver Amulet (+3 M.Def/P.Def, ~18K) — open amulet slot")
+
+        # ──────────────────────────────────
+        # ARMOR PROGRESSION SUGGESTIONS
+        # ──────────────────────────────────
+        armor_set = c.get('_armor_set', '')
+        astats = c.get('_armor_stats', {})
+        current_pdef = astats.get('pdef', 0)
+        armor_class = cls
+        # Fighters using heavy armor are tanks
+        if cls == 'fighter':
+            body = equipped.get('body', {})
+            body_armor_class = body.get('armorClass', '')
+            if body_armor_class == 'heavy':
+                armor_class = 'tank'
+
+        upgrades = state.find_armor_upgrade(armor_class, current_pdef, 0, lv)
+        if upgrades:
+            next_set = upgrades[0]
+            pdef_gain = next_set.get('pdef', 0) - current_pdef
+            bonus = next_set.get('bonus', '')
+            bonus_str = f" — {bonus}" if bonus else ""
+            char_gold = c.get('gold', 0)
+            if char_gold >= next_set['price']:
+                state.log(f"  🛡️ Next armor: {next_set['name']} (P.Def +{pdef_gain}, {next_set['price']:,}g) — ✅ can buy{bonus_str}")
+            else:
+                short = next_set['price'] - char_gold
+                pct = int(char_gold / next_set['price'] * 100) if next_set['price'] else 0
+                state.log(f"  🛡️ Next armor: {next_set['name']} (P.Def +{pdef_gain}, {next_set['price']:,}g) — 💰 {pct}% ({short:,}g more){bonus_str}")
 
     # ─────────────────────────────────────────────────
     # 2b. WAREHOUSE & GOLD POOLING
@@ -1151,7 +1259,7 @@ async def main():
             break
 
     if party_quest_active:
-        state.log(f"  🎯 Party quest active for all 3: «{party_quest_name}»")
+        state.log(f"  🎯 Party quest active for {len(chars)} chars: «{party_quest_name}»»")
         state.log(f"     Stage: {party_quest_stage}")
         state.log(f"     ⚠️ Auto-farm disabled while in party!")
         state.log(f"     💡 Form party when ready to boss together (WS commands: party:invite + party:accept)")
