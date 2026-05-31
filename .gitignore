@@ -1,0 +1,4 @@
+.env
+gr2-config.json
+*.pyc
+__pycache__/
