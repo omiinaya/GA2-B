@@ -46,6 +46,7 @@ async def main():
         orig_stdout = sys.stdout
         try:
             log_fh = open(LOG_FILE, 'a')
+            log_fh.reconfigure(line_buffering=True)  # flush every line — block buffering hides logs until 8KB
             sys.stdout = log_fh
         except OSError:
             log_fh = None
