@@ -113,6 +113,18 @@ GEAR_RECIPES = {
     ],
 }
 
+# Ascendancy class preference by character id (falls back to default).
+# Options seen 2026-08-04: wizard→bishop/necromancer/prophet/sorcerer;
+# fighter→dark_avenger/gladiator/hawkeye/paladin/treasure_hunter/warlord.
+# Defaults: healer wizard→bishop (holy healer), dps wizard→sorcerer (fire dps),
+# tank fighter→paladin (holy knight / protector).
+ASCEND_PREF = {
+    'default': 'sorcerer',
+    1069: 'sorcerer',    # BuffBot — wizard dps
+    1070: 'bishop',      # HermesHeal — wizard healer
+    1071: 'paladin',     # ShieldBot — fighter tank
+}
+
 # Tracked material names for inventory scanning
 MATERIAL_NAMES = [
     "Animal Skin", "Bone Fragment", "Iron Ore", "Stem",

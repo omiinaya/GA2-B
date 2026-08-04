@@ -39,6 +39,10 @@ class CharacterAgent:
         self.mp = 100
         self.max_mp = 100
         self.gold = 0
+        # Progression NPCs (discovered 2026-08-04 via /api/npcs/{id}/dialogue +
+        # client JS: trainer 9 "advanced combat techniques", shop 8 sells gear).
+        self.trainer_npc_id = 9
+        self.shop_npc_id = 8
         self.xp = 0
         self.inventory = []
         self.equipped_gear = []
@@ -747,6 +751,17 @@ class CharacterAgent:
             # included in the rotation when a qualifying weapon is equipped.
             self._auto_equip_best_weapon()
             self.fetch_inventory()  # refresh after equip
+            # Train affordable skills + claim completed quest rewards once at
+            # connect (2026-08-04 progression wiring — cheap high-ROI upgrades).
+            self._auto_train_skills()
+            self._claim_completed_quests()
+            # Upgrade armor from the shop if gold is comfortable (50% budget;
+            # keeps crafting/training economy alive). 2026-08-04: ShieldBot was
+            # farming in starter Leather (p_def 8) and dying — full Steel set
+            # (p_def ~115 total) took him 1276 → 1416 effective HP.
+            if (self.gold or 0) > 200000:
+                self._auto_buy_gear_upgrades()
+                self.fetch_inventory()
             await self._load_skills_from_rest()
             # Pre-filter skills based on current weapon — removes skills that
             # require weapons we don't have, so _use_best_skill doesn't waste
@@ -3795,6 +3810,198 @@ class CharacterAgent:
             return None
 
     
+    def _auto_train_skills(self, trainer_npc_id=None):
+        """Train every affordable, learnable skill from the skill trainer.
+
+        Discovery (2026-08-04, client JS threatmeter chunk): training is NPC-
+        gated — GET /api/training/{npc}/skills?characterId= lists skills with
+        canLearn + trainingCostGold; POST /api/training/{npc}/train
+        {characterId, skillId} trains. Trainer NPC 9 (Gludios) was found by
+        scanning /api/npcs/{id}/dialogue for training options ("I can teach you
+        advanced combat techniques — for a price"). No proximity gate: training
+        succeeds from any zone.
+
+        Manual train of ShieldBot's 5 skills (Power Strike/Mortal Blow/Power
+        Shot/Weapon Training/Light Armor Mastery to Lv3, 175k gold) verified the
+        endpoint and upgraded his kit while Power Strike was power ~30 → ~112.
+        """
+        try:
+            npc = trainer_npc_id or self.trainer_npc_id
+            data = self.rest.get(f'/api/training/{npc}/skills?characterId={self.char_id}')
+            if not isinstance(data, list):
+                self.analytics.log(f"[{self.name}] training: no skill list from NPC {npc}")
+                return 0
+            trained = 0
+            for s in data:
+                if not s.get('canLearn'):
+                    continue
+                cost = s.get('trainingCostGold') or 0
+                if cost <= 0:
+                    continue
+                if (self.gold or 0) < cost:
+                    self.analytics.log(f"[{self.name}] training: {s.get('name')} Lv{s.get('skillLevel')} "
+                                       f"needs {cost} gold (have {self.gold}) — skip")
+                    continue
+                res = self.rest.post(f'/api/training/{npc}/train', {
+                    'characterId': self.char_id,
+                    'skillId': s.get('skillId')})
+                if isinstance(res, dict) and res.get('status') == 'ok':
+                    self.gold = max(0, (self.gold or 0) - cost)
+                    trained += 1
+                    self.analytics.log(f"[{self.name}] ⬆️ Trained {s.get('name')} "
+                                       f"Lv{s.get('skillLevel')} ({cost} gold)")
+                else:
+                    self.analytics.log(f"[{self.name}] training {s.get('name')}: {res}")
+            if trained:
+                # Refresh skill set so the combat AI picks up new levels/spells
+                try:
+                    import asyncio
+                    self._load_skills_from_rest_task = asyncio.get_event_loop().create_task(
+                        self._load_skills_from_rest())
+                except Exception:
+                    pass
+            return trained
+        except Exception as e:
+            self.analytics.log(f"[{self.name}] auto-train failed: {e}")
+            return 0
+
+    def fetch_shop_inventory(self, npc_id=None):
+        '''Get buyable items from a shop NPC (GET /api/shop/{npc}/inventory).'''
+        npc = npc_id or self.trainer_npc_id
+        data = self.rest.get(f'/api/shop/{npc}/inventory')
+        if isinstance(data, list):
+            return data
+        if isinstance(data, dict) and 'items' in data:
+            return data['items']
+        return []
+
+    def _auto_buy_gear_upgrades(self, shop_npc_id=None, budget_pct=0.5):
+        """Buy affordable armor/accessory upgrades from the shop.
+
+        Uses the shop inventory (name + buyPrice + slot + statsJson) instead of
+        guessing item IDs. Skips weapons (handled by _auto_equip_best_weapon
+        from bag drops), focuses on body/legs/head/gloves/boots + ring/amulet
+        slots the char has empty or badly armored. Respects a gold budget so
+        the farm economy (crafting, training) isn't starved.
+
+        Flow (verified 2026-08-04): POST /api/shop/{npc}/buy {characterId,
+        itemId, quantity} → {status: ok}; the item lands in the bag; equip via
+        POST /api/inventory/{cid}/equip {inventoryId: <bag item id>}.
+        """
+        try:
+            npc = shop_npc_id or self.shop_npc_id
+            inv = self.fetch_shop_inventory(npc)
+            if not inv:
+                return 0
+            # Recompute current equipped stats from a fresh inventory read
+            self.fetch_inventory()
+            equipped = {e.get('equippedSlot') or e.get('itemSlot'): e
+                        for e in (self.equipped_gear or [])}
+            budget = int((self.gold or 0) * budget_pct)
+            bought = 0
+            slot_order = ['body', 'legs', 'head', 'gloves', 'boots', 'ring1', 'ring2', 'amulet']
+            for it in inv:
+                slot = it.get('slot')
+                if slot not in slot_order:
+                    continue
+                # Parse stats (statsJson is a JSON string, e.g. {"p_def": 37})
+                stats = {}
+                raw_stats = it.get('statsJson') or it.get('stats') or {}
+                if isinstance(raw_stats, str):
+                    try:
+                        stats = json.loads(raw_stats)
+                    except Exception:
+                        stats = {}
+                elif isinstance(raw_stats, dict):
+                    stats = raw_stats
+                it_pdef = stats.get('p_def') or stats.get('pDef') or 0
+                it_mdef = stats.get('m_def') or stats.get('mDef') or 0
+                cur = equipped.get(slot)
+                if cur:
+                    cur_stats = {}
+                    cur_raw = cur.get('statsJson') or cur.get('stats') or {}
+                    if isinstance(cur_raw, str):
+                        try:
+                            cur_stats = json.loads(cur_raw)
+                        except Exception:
+                            cur_stats = {}
+                    elif isinstance(cur_raw, dict):
+                        cur_stats = cur_raw
+                    cur_pdef = cur_stats.get('p_def') or cur_stats.get('pDef') or 0
+                    cur_mdef = cur_stats.get('m_def') or cur_stats.get('mDef') or 0
+                    if it_pdef <= cur_pdef and it_mdef <= cur_mdef:
+                        continue
+                price = it.get('buyPrice') or it.get('baseBuyPrice') or 0
+                if price <= 0 or price > budget:
+                    continue
+                res = self.rest.post(f'/api/shop/{npc}/buy', {
+                    'characterId': self.char_id,
+                    'itemId': it.get('itemId'),
+                    'quantity': 1})
+                if isinstance(res, dict) and res.get('status') == 'ok':
+                    self.gold = max(0, (self.gold or 0) - price)
+                    budget -= price
+                    bought += 1
+                    self.analytics.log(f"[{self.name}] 🛒 Bought {it.get('name')} "
+                                       f"({slot}, {price} gold)")
+                    # The item is in the bag now — find and equip it. For ring
+                    # swaps, unequip the old ring first.
+                    if slot in ('ring1', 'ring2') and cur:
+                        self.unequip_slot(slot)
+                    self.fetch_inventory()
+                    for bag_it in self.inventory or []:
+                        if bag_it.get('itemName') == it.get('name') and not bag_it.get('equipped'):
+                            self.equip_item(bag_it.get('id'))
+                            break
+            return bought
+        except Exception as e:
+            self.analytics.log(f"[{self.name}] auto-buy gear failed: {e}")
+            return 0
+
+    def fetch_quest_progress(self):
+        '''Fetch active + available quests, return (active, available).'''
+        active = self.fetch_active_quests() or []
+        available = self.fetch_available_quests() or []
+        return active, available
+
+    def _claim_completed_quests(self):
+        """Claim any quest whose stage progress has reached its target.
+
+        Real progress lives in ACTIVE quests' stageInfo (current vs target) —
+        the quest template's completionState field is NOT progress (verified
+        2026-08-04: quest 3 showed completionState=11 but stageInfo.current=0/10
+        right after accept; complete/claim correctly refused). Once a stage is
+        done, run complete→claim; treat errors as already-in-progress."""
+        try:
+            active, _ = self.fetch_quest_progress()
+            claimed = 0
+            for entry in active or []:
+                q = entry.get('quest', entry)
+                qid = q.get('id')
+                stage = entry.get('stageInfo', {}) or {}
+                current = stage.get('current') or 0
+                target = stage.get('target') or 0
+                if target <= 0 or current < target:
+                    continue
+                self.analytics.log(f"[{self.name}] quest {q.get('name')} stage done "
+                                   f"({current}/{target}) — completing")
+                for action in ('complete', 'claim'):
+                    try:
+                        res = self.rest.post(f'/api/quests/{qid}/{action}', {
+                            'characterId': self.char_id})
+                        if isinstance(res, dict):
+                            status = res.get('status', '')
+                            if status == 'ok':
+                                claimed += 1
+                                self.analytics.log(f"[{self.name}] ✅ quest {action}: {q.get('name')}")
+                                break
+                    except Exception:
+                        continue
+            return claimed
+        except Exception as e:
+            self.analytics.log(f"[{self.name}] quest claim failed: {e}")
+            return 0
+
     def buy_item(self, npc_id = None, item_id = None, quantity = (1,)):
         return self.rest.post(f'''/api/shop/{npc_id}/buy''', {
             'characterId': self.char_id,

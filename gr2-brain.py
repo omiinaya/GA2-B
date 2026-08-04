@@ -20,7 +20,7 @@ import subprocess
 from gr2_config import *  # CREDENTIALS, API_BASE, WS_BASE, PID_FILE, LOG_FILE
 from gr2_data import (PROGRESSION, WEAPON_TREE, ARMOR_TREE, BEST_STAFF_SHOP,
     BEST_ARCANE_SHOP, STAFF_ITEM_IDS, ACCESSORY_SLOTS, ACCESSORY_ITEM_IDS,
-    ACCESSORY_TREE, MATERIAL_RECIPES, GEAR_RECIPES, MATERIAL_NAMES)
+    ACCESSORY_TREE, MATERIAL_RECIPES, GEAR_RECIPES, MATERIAL_NAMES, ASCEND_PREF)
 from gr2_api import api_post, api_get, api_put
 from gr2_state import State
 from gr2_ws import ws_travel
@@ -1162,13 +1162,21 @@ async def main():
             try:
                 options = api_get(f'/api/ascendancy/options?characterId={cid}', state.token)
                 state.log(f"     Options: {json.dumps(options)[:300]}")
-                # Auto-ascend to recommended path
+                # Auto-ascend to the recommended path. The client's ascend call
+                # takes {characterId, ascendedClass} (class slug), NOT an
+                # ascendancyId — the old field silently no-op'd (2026-08-04,
+                # verified against the game client threatmeter chunk).
                 if isinstance(options, list) and options:
                     best = options[0]
-                    aid = best.get('id', best.get('ascendancyId'))
-                    aname = best.get('name', '?')
+                    # Prefer a role-aligned class when it exists
+                    desired = ASCEND_PREF.get(cid, ASCEND_PREF.get('default', ''))
+                    chosen = next((o for o in options if o.get('ascendedClass') == desired),
+                                  best)
+                    acls = chosen.get('ascendedClass')
+                    aname = chosen.get('ascendedClass', '?')
                     state.log(f"     Ascending to {aname}...")
-                    result = api_post('/api/ascendancy/ascend', {"characterId": cid, "ascendancyId": aid}, state.token)
+                    result = api_post('/api/ascendancy/ascend',
+                                      {"characterId": cid, "ascendedClass": acls}, state.token)
                     state.log(f"     → {json.dumps(result)[:200]}")
             except urllib.request.HTTPError as e:
                 body = e.read().decode()[:100]
