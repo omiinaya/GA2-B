@@ -513,10 +513,10 @@ class CharacterAgent:
         self._total_cast_errors = 0
         self._skill_damage_log = {}  # skill_id -> {'casts': 0, 'total_dmg': 0, 'name': str}
         if self.role == 'tank':
-            self.rest_hp_threshold = 0.25
-            self.rest_mp_threshold = 0.15
-            self.rest_hp_target = 0.75
-            self.rest_mp_target = 0.5
+            self.rest_hp_threshold = 0.40  # was 0.25 — tanks died before resting in Lv21-24 zones
+            self.rest_mp_threshold = 0.30  # was 0.15
+            self.rest_hp_target = 0.85
+            self.rest_mp_target = 0.6
         elif self.role == 'healer':
             self.rest_hp_threshold = 0.5
             self.rest_mp_threshold = 0.50  # Rest earlier to avoid MP dead zone
@@ -530,6 +530,7 @@ class CharacterAgent:
         self.skills = []
         self.auto_config = []
         self.world = None  # WorldData — lazily initialized for multi-hop travel
+        self._cached_map = None  # cache of /api/world/map — the endpoint is slow (1.4-4.4s) + flaky
         self.session_kills = 0
         self.session_damage = 0
         self.session_healing = 0
@@ -1755,6 +1756,18 @@ class CharacterAgent:
                     # instead of sitting idle for 60+ seconds.
                     rested = await self._check_rest_needed()
                     return
+                # City escape (zone 149): the zone finder is the ONLY way back —
+                # _hunting_zone_id may be None after the travel error handler
+                # cleared it, and without this call the char sits IDLE in the
+                # city forever at full HP (observed 2026-08-04 manual run:
+                # 9 min IDLE in Gludios with 0 monsters, 0 gold).
+                if self.combat_state != 'TRAVELING':
+                    zi_now = None
+                    if self.world and self.world.zones:
+                        zi_now = self.world.zones.get(self.current_zone_id)
+                    if (zi_now and zi_now.zone_type == 'city') or not self._hunting_zone_id:
+                        if time.time() > getattr(self, '_travel_backoff', 0):
+                            await self._find_and_travel_hunting_zone()
                 if self._hunting_zone_id and self.current_zone_id != self._hunting_zone_id:
                     # Travel timeout: if we've been stuck in TRAVELING past the
                     # travel timeout (90s for multi-hop), reset to IDLE so the
@@ -2940,7 +2953,32 @@ class CharacterAgent:
             return  # Skip zone search entirely while town backoff is active
         self.analytics.log(f"[{self.name}] Finding hunting zone for Lv{self.level}...")
         try:
-            map_data = self.rest.get('/api/world/map')
+            # Prefer the CACHED map (self._cached_map) — /api/world/map is slow
+            # (1.4-4.4s) and flaky: when it returns None (observed 2026-08-04),
+            # the whole block is skipped and the finder loops "Could not find
+            # hunting zone" forever while the char sits IDLE. Cache successful
+            # fetches; refresh at most once every 5 minutes.
+            map_data = self._cached_map
+            if map_data is None or time.time() - getattr(self, '_map_cached_at', 0) > 300:
+                if self.world is not None and self.world.zones:
+                    conns = []
+                    for za, neighbors in self.world.adjacency.items():
+                        for n in neighbors:
+                            conns.append({'zoneAId': za, 'zoneBId': n.get('target_id')})
+                    map_data = {'zones': [
+                        {'id': zid, 'name': zi.name, 'type': zi.zone_type,
+                         'levelRangeMin': zi.level_min, 'levelRangeMax': zi.level_max}
+                        for zid, zi in self.world.zones.items()
+                    ], 'connections': conns}
+                else:
+                    for _attempt in range(3):
+                        map_data = self.rest.get('/api/world/map')
+                        if isinstance(map_data, dict) and map_data.get('zones'):
+                            break
+                        await asyncio.sleep(1)
+                if isinstance(map_data, dict) and map_data.get('zones'):
+                    self._cached_map = map_data
+                    self._map_cached_at = time.time()
             if isinstance(map_data, dict) and map_data.get('zones'):
                 # Build zone info from the zones array (has correct types)
                 zones_info = {}
@@ -3190,7 +3228,13 @@ class CharacterAgent:
                             self._hunting_zone_id = mzid
                             await self._travel_to_hunting_zone()
                             return
-            self.analytics.log(f"[{self.name}] Could not find hunting zone for Lv{self.level} — clearing hunting zone")
+            self.analytics.log(f"[{self.name}] Could not find hunting zone for Lv{self.level} — clearing blacklist to retry flaky zones")
+            # A zone that flaked once ("no connection") must not be banned
+            # forever — the server's routing is inconsistent with the API map
+            # (149→64188 works sometimes, fails others; observed 2026-08-04).
+            # Clear the blacklist so the next tick retries the real hunting
+            # grounds instead of looping "Could not find" for 9+ minutes.
+            self._zone_travel_blacklist.clear()
             self._hunting_zone_id = None
             # When stuck in town (zone 1) with no reachable hunting zones,
             # enable auto-farm as a productive fallback instead of looping
