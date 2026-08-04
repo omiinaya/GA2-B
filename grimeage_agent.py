@@ -79,6 +79,85 @@ VENDOR_TRASH_KEYWORDS = {
     'torn',
     'worn'}
 
+# Weapon stats by name: (p_atk, m_atk, levelRequired) — from the game's item
+# catalog (2026-08-04). Used by _auto_equip_best_weapon to never leave an
+# upgrade in the bag (equipping ShieldBot's bagged Mithril Warhammer 5.3x'd the
+# manual farm rate: 2,440 -> 12,976 g/hr).
+WEAPON_CATALOG = {
+    'Abyssal Blade': (184, 106, 40),
+    'Abyssal Crusher': (210, 122, 40),
+    'Abyssal Greatsword': (267, 128, 40),
+    'Abyssal Kris': (138, 91, 40),
+    'Abyssal Staff': (167, 210, 40),
+    'Abyssal War Fists': (191, 81, 40),
+    'Abyssal Warbow': (323, 83, 40),
+    'Aether Blade': (209, 121, 52),
+    'Aether Crusher': (239, 139, 52),
+    'Aether Greatsword': (304, 146, 52),
+    'Aether Kris': (157, 103, 52),
+    'Aether Staff': (190, 239, 52),
+    'Aether War Fists': (217, 92, 52),
+    'Aether Warbow': (367, 94, 52),
+    'Apprentice Greatsword': (18, 9, 0),
+    'Arcane Staff': (44, 55, 0),
+    "Archmage's Staff": (88, 110, 20),
+    "Assassin's Dagger": (36, 24, 0),
+    'Broad Sword': (28, 16, 0),
+    "Champion's Greatsword": (70, 34, 0),
+    "Crab King's Claw": (62, 36, 0),
+    'Crystal-Woven Staff': (64, 80, 0),
+    'Dual Abyssal Swords': (241, 115, 40),
+    'Dual Aether Swords': (274, 131, 52),
+    'Dual Eldritch Swords': (164, 78, 40),
+    'Dual Empyrean Swords': (303, 145, 52),
+    'Dual Mithril Swords': (95, 45, 0),
+    'Dual Runic Swords': (126, 60, 20),
+    'Eldritch Blade': (125, 72, 40),
+    'Eldritch Crusher': (143, 83, 40),
+    'Eldritch Greatsword': (182, 87, 40),
+    'Eldritch Kris': (94, 62, 40),
+    'Eldritch Staff': (114, 143, 40),
+    'Eldritch War Fists': (130, 55, 40),
+    'Eldritch Warbow': (220, 47, 40),
+    'Empyrean Blade': (231, 134, 52),
+    'Empyrean Crusher': (264, 154, 52),
+    'Empyrean Greatsword': (336, 161, 52),
+    'Empyrean Kris': (174, 114, 52),
+    'Empyrean Staff': (210, 264, 52),
+    'Empyrean War Fists': (240, 102, 52),
+    'Empyrean Warbow': (406, 104, 52),
+    'Iron Greatsword': (42, 20, 0),
+    'Iron Knuckles': (10, 5, 0),
+    'Iron Mace': (32, 19, 0),
+    "Knight's Sword": (48, 28, 0),
+    'Longbow': (38, 11, 0),
+    'Mithril Claws': (66, 32, 0),
+    'Mithril Composite Bow': (98, 27, 0),
+    'Mithril Greatsword': (105, 50, 0),
+    'Mithril Longsword': (72, 42, 0),
+    'Mithril Stiletto': (54, 36, 0),
+    'Mithril Warhammer': (82, 48, 0),
+    'Oak Staff': (26, 32, 0),
+    'Runic Blade': (96, 56, 20),
+    'Runic Crusher': (110, 64, 20),
+    'Runic Greatsword': (140, 67, 20),
+    'Runic Kris': (72, 48, 20),
+    'Runic War Fists': (88, 42, 20),
+    'Runic Warbow': (132, 36, 20),
+    'Rusted Dagger': (8, 5, 0),
+    "Shadowlord's Blade": (88, 42, 0),
+    'Short Sword': (12, 7, 0),
+    'Shortbow': (16, 4, 0),
+    'Spiked Gauntlets': (44, 21, 0),
+    'Steel Cestus': (25, 12, 0),
+    'Steel Dagger': (20, 13, 0),
+    "Treant Elder's Staff": (58, 72, 0),
+    'War Bow': (65, 18, 0),
+    'War Mace': (55, 32, 0),
+    'Wooden Mace': (14, 8, 0),
+    'Wooden Staff': (11, 14, 0),
+}
+
 def init_db():
     '''Initialize SQLite database for persistent analytics.'''
     conn = sqlite3.connect(DB_PATH)
@@ -1135,6 +1214,11 @@ class CharacterAgent:
             self._log_progression('connect', f'Lv{self.level} in zone {self.current_zone_id}')
             # Fetch skills, gear, and inventory from REST
             self.fetch_inventory()  # Populates equipped_gear for weapon checks
+            # Never leave an upgrade in the bag — equip the best weapon by class
+            # stat BEFORE filtering skills, so dagger/bow-gated skills get
+            # included in the rotation when a qualifying weapon is equipped.
+            self._auto_equip_best_weapon()
+            self.fetch_inventory()  # refresh after equip
             await self._load_skills_from_rest()
             # Pre-filter skills based on current weapon — removes skills that
             # require weapons we don't have, so _use_best_skill doesn't waste
@@ -3011,6 +3095,13 @@ class CharacterAgent:
                 if isinstance(map_data, dict) and map_data.get('zones'):
                     self._cached_map = map_data
                     self._map_cached_at = time.time()
+                elif self._cached_map is not None:
+                    # /api/world/map flaked (returned None) AND world not
+                    # loaded — fall back to the LAST GOOD cache instead of
+                    # dropping into the "Could not find hunting zone" loop
+                    # (observed 2026-08-04 healer run: ~9 min stuck after the
+                    # 5-min cache expired mid-run, map fetch returning None).
+                    map_data = self._cached_map
             if isinstance(map_data, dict) and map_data.get('zones'):
                 # Build zone info from the zones array (has correct types)
                 zones_info = {}
@@ -4133,6 +4224,47 @@ class CharacterAgent:
     def unequip_slot(self, slot=None):
         return self.rest.post(f'''/api/inventory/{self.char_id}/unequip''', {
             'slot': slot })
+
+    def _auto_equip_best_weapon(self):
+        """Equip the highest-stat weapon from the bag by class stat (fighter/
+        tank → p_atk, wizard → m_atk), respecting level requirements.
+
+        Prevents leaving upgrades in the bag — 2026-08-04: ShieldBot farmed with
+        Broad Sword (28) while Mithril Warhammer (82) sat in his bag; equipping
+        it 5.3x'd the manual farm rate (2,440 → 12,976 g/hr). Runs at connect
+        (first game_state) before skill filtering so dagger/bow unlocks are
+        reflected in the rotation."""
+        try:
+            inv = self.fetch_inventory()
+            if not isinstance(inv, dict):
+                return None
+            stat_idx = 1 if getattr(self, 'char_class', '') == 'wizard' else 0
+            cur_items = inv.get('equipped', []) or []
+            cur_best = 0
+            for it in cur_items:
+                st = WEAPON_CATALOG.get(it.get('itemName'))
+                if st:
+                    cur_best = max(cur_best, st[stat_idx])
+            best, best_val = None, cur_best
+            for it in inv.get('bag', []) or []:
+                if (it.get('itemType') or '').lower() != 'weapon':
+                    continue
+                st = WEAPON_CATALOG.get(it.get('itemName'))
+                if not st:
+                    continue
+                if (self.level or 0) < st[2]:
+                    continue  # level-gated
+                if st[stat_idx] > best_val:
+                    best, best_val = it, st[stat_idx]
+            if best:
+                res = self.equip_item(best.get('id') or best.get('inventoryId'))
+                self.analytics.log(f"[{self.name}] Auto-equipped {best.get('itemName')} "
+                                   f"({'m_atk' if stat_idx else 'p_atk'}={best_val}) — was {cur_best}")
+                return res
+            return None
+        except Exception as e:
+            self.analytics.log(f"[{self.name}] auto-equip failed: {e}")
+            return None
 
     
     def buy_item(self, npc_id = None, item_id = None, quantity = (1,)):
