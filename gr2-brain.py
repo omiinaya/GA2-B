@@ -13,6 +13,7 @@ import json, sys, time, os
 import urllib.request
 import asyncio
 from collections import deque
+import subprocess
 
 # === CONFIG ===
 # Credentials loaded in priority order:
@@ -44,6 +45,8 @@ else:
         sys.exit(1)
 API_BASE = "https://grimeage2.com"
 WS_BASE = "wss://grimeage2.com"
+PID_FILE = os.path.expanduser('~/.hermes/gr2-combat-daemon.pid')
+LOG_FILE = os.path.expanduser('~/.hermes/gr2-combat-daemon.log')
 
 # Zone progression tiers: (level_min, level_max, [best_zone, ok_zone, fallback_zone])
 PROGRESSION = [
@@ -193,6 +196,21 @@ def api_get(path, token):
         return json.loads(resp.read())
 
 
+def api_put(path, data, token):
+    headers = {'Content-Type': 'application/json'}
+    if token:
+        headers['Authorization'] = f'Bearer {token}'
+    req = urllib.request.Request(
+        f'{API_BASE}{path}',
+        data=json.dumps(data).encode(),
+        headers=headers,
+        method='PUT',
+    )
+    with urllib.request.urlopen(req, timeout=15) as resp:
+        raw = resp.read()
+        return json.loads(raw) if raw.strip() else {}
+
+
 # === STATE ===
 class State:
     def __init__(self):
@@ -327,6 +345,21 @@ async def ws_travel(token, char_id, target_zone, timeout=45):
 
 # === MAIN ===
 async def main():
+    # ─────────────────────────────────────────────────
+    # 0a. CRON LOCK WATCHDOG — Remove stale .tick.lock
+    #     Prevents cron scheduler deadlock (pitfall #22).
+    #     The lock file blocks ALL cron jobs, including this brain.
+    # ─────────────────────────────────────────────────
+    lockfile = os.path.expanduser('~/.hermes/cron/.tick.lock')
+    if os.path.exists(lockfile):
+        try:
+            age = time.time() - os.path.getmtime(lockfile)
+            if age > 300:  # 5 min stale
+                os.remove(lockfile)
+                print(f"  🐕 Removed stale .tick.lock (age: {int(age)}s)")
+        except OSError:
+            pass
+
     state = State()
 
     # Login
@@ -352,6 +385,39 @@ async def main():
     znames = {}
     for c in chars:
         znames[c['currentZoneId']] = state.get_zone_name(c['currentZoneId'])
+
+    # ─────────────────────────────────────────────────
+    # 0. SUPERVISE COMBAT DAEMON
+    # ─────────────────────────────────────────────────
+    daemon_pid_file = os.path.expanduser('~/.hermes/gr2-combat-daemon.pid')
+    daemon_script = os.path.expanduser('~/.hermes/scripts/gr2-combat-daemon.py')
+    daemon_running = False
+    if os.path.exists(daemon_pid_file):
+        try:
+            with open(daemon_pid_file) as f:
+                pid = int(f.read().strip())
+            # Check if pid is alive and is our daemon
+            os.kill(pid, 0)  # signal 0 = check existence
+            daemon_running = True
+        except (OSError, ValueError):
+            # PID stale — remove stale file
+            try:
+                os.remove(daemon_pid_file)
+            except OSError:
+                pass
+    if not daemon_running:
+        print(f"  🔧 Combat daemon not running — starting it...")
+        subprocess.Popen(
+            [sys.executable, daemon_script],
+            stdout=open(LOG_FILE, 'a'),
+            stderr=subprocess.STDOUT,
+            stdin=subprocess.DEVNULL,
+            start_new_session=True
+        )
+        print(f"  ✅ Combat daemon launched (check logs: {LOG_FILE})")
+    else:
+        pid = int(open(daemon_pid_file).read().strip())
+        print(f"  ✅ Combat daemon running (PID {pid})")
 
     # ─────────────────────────────────────────────────
     # 1. CHARACTER STATUS REPORT
@@ -1259,12 +1325,125 @@ async def main():
             break
 
     if party_quest_active:
-        state.log(f"  🎯 Party quest active for {len(chars)} chars: «{party_quest_name}»»")
+        state.log(f"  🎯 Party quest active for {len(chars)} chars: «{party_quest_name}»")
         state.log(f"     Stage: {party_quest_stage}")
-        state.log(f"     ⚠️ Auto-farm disabled while in party!")
-        state.log(f"     💡 Form party when ready to boss together (WS commands: party:invite + party:accept)")
     else:
         state.log(f"  No party quests active (all solo farming)")
+
+    # ══════════════════════════════════════════════
+    # 5b. SKILL ROTATION MANAGEMENT
+    # ══════════════════════════════════════════════
+    state.log("")
+    state.log("═" * 50)
+    state.log("SKILL ROTATIONS")
+    state.log("─" * 50)
+
+    # Optimal rotations per role
+    ROTATIONS = {
+        "tank": [  # ShieldBot — priority: damage > utility
+            {"skillId": 42118, "autoPriority": 1, "autoEnabled": True, "name": "Mortal Blow"},
+            {"skillId": 200,   "autoPriority": 2, "autoEnabled": True, "name": "Power Strike"},
+            {"skillId": 13285, "autoPriority": 3, "autoEnabled": True, "name": "Power Shot"},
+        ],
+        "healer": [  # HermesHeal — priority: heals > damage
+            {"skillId": 67344, "autoPriority": 1, "autoEnabled": True, "name": "Battle Heal"},
+            {"skillId": 67493, "autoPriority": 2, "autoEnabled": True, "name": "Heal"},
+            {"skillId": 38310, "autoPriority": 3, "autoEnabled": True, "name": "Group Heal"},
+            {"skillId": 37042, "autoPriority": 4, "autoEnabled": True, "name": "Curse: Poison"},
+            {"skillId": 232,   "autoPriority": 5, "autoEnabled": True, "name": "Wind Strike"},
+        ],
+        "dps": [  # BuffBot — priority: DoT > nuke > sustain (NO heal skills in rotation)
+            # Heal skills removed from DPS rotation: _dps_tick calls _heal_party_members
+            # directly for emergency self-heal (HP<25%). Having heal skills in the rotation
+            # adds no value for manual DPS since _use_best_skill skips heal-type skills.
+            {"skillId": 37042, "autoPriority": 1, "autoEnabled": True, "name": "Curse: Poison"},
+            {"skillId": 232,   "autoPriority": 2, "autoEnabled": True, "name": "Wind Strike"},
+        ],
+    }
+
+    # Role-to-character mapping from CHARACTERS config
+    CHAR_ROLE = {
+        1069: "dps",
+        1070: "healer",
+        1071: "tank",
+    }
+
+    for c in chars:
+        cid = c['id']
+        name = c['name']
+        role = CHAR_ROLE.get(cid, "dps")
+        optimal = ROTATIONS.get(role, [])
+
+        # Fetch current config
+        try:
+            cfg = api_get(f'/api/skills/config/{cid}', state.token)
+        except Exception as e:
+            state.log(f"  ⚠️ {name}: couldn't fetch config: {e}")
+            continue
+
+        if not isinstance(cfg, list):
+            state.log(f"  ⚠️ {name}: no config returned")
+            continue
+
+        # Check if current rotation matches optimal
+        current_active = [s for s in cfg if s.get('skillId') in {r['skillId'] for r in optimal}]
+        needs_update = False
+
+        if len(current_active) < len(optimal):
+            needs_update = True
+            state.log(f"  🔄 {name}: missing skills in rotation (has {len(current_active)}/{len(optimal)})")
+        else:
+            for opt in optimal:
+                found = next((s for s in current_active if s['skillId'] == opt['skillId']), None)
+                if not found:
+                    needs_update = True
+                    state.log(f"  🔄 {name}: missing {opt['name']}")
+                    break
+                if found.get('autoPriority') != opt['autoPriority']:
+                    needs_update = True
+                    state.log(f"  🔄 {name}: {opt['name']} priority {found.get('autoPriority')}→{opt['autoPriority']}")
+                    break
+
+        if needs_update:
+            # Build the full config preserving existing entries not in our rotation
+            existing_map = {s['skillId']: s for s in cfg}
+            new_config = []
+            for opt in optimal:
+                existing = existing_map.get(opt['skillId'], {})
+                new_config.append({
+                    "skillId": opt['skillId'],
+                    "autoPriority": opt['autoPriority'],
+                    "autoEnabled": opt.get('autoEnabled', existing.get('autoEnabled', True)),
+                    "gateSelfHpMin": existing.get('gateSelfHpMin', 0),
+                    "gateSelfHpMax": existing.get('gateSelfHpMax', 100),
+                    "gateSelfMpMin": existing.get('gateSelfMpMin', 10),
+                    "gateSelfMpMax": existing.get('gateSelfMpMax', 100),
+                })
+            # Keep any skills not in our rotation (passives, utility) at high priority
+            for sid, s in existing_map.items():
+                if sid not in {r['skillId'] for r in optimal}:
+                    new_config.append({
+                        "skillId": sid,
+                        "autoPriority": 99,
+                        "autoEnabled": s.get('autoEnabled', True),
+                        "gateSelfHpMin": s.get('gateSelfHpMin', 0),
+                        "gateSelfHpMax": s.get('gateSelfHpMax', 100),
+                        "gateSelfMpMin": s.get('gateSelfMpMin', 10),
+                        "gateSelfMpMax": s.get('gateSelfMpMax', 100),
+                    })
+
+            # Push updated config via PUT
+            try:
+                result = api_put(f'/api/skills/config/{cid}', {"autoConfig": new_config}, state.token)
+                if isinstance(result, dict) and result.get('status') == 'ok':
+                    state.log(f"  ✅ {name}: rotation updated ({len(optimal)} skills)")
+                else:
+                    state.log(f"  ⚠️ {name}: update returned: {result}")
+                # Also update SpacetimeDB via collector (will pick up next cycle)
+            except Exception as e:
+                state.log(f"  ❌ {name}: update failed: {e}")
+        else:
+            state.log(f"  ✅ {name}: rotation optimal ({len(optimal)} skills)")
 
     # ══════════════════════════════════════════════
     # 6. BOSS & RAID TRACKING
