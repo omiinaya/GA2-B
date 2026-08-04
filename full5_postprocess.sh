@@ -42,6 +42,7 @@ if [ "$CONTAM_COUNT" -gt 0 ]; then
         --db spacetime-memory-v2 --stmem-host 192.168.1.10 --stmem-port 3001 \
         --run-id a2e9b6fd \
         --answerer-model deepseek-v4-flash-free --judge-model deepseek-v4-flash-free \
+        --cutoff 10 20 50 200 \
         >> "$LOGFILE" 2>&1
     log "repair finished"
 else
