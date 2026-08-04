@@ -898,8 +898,13 @@ class CharacterAgent:
         elif msg_type == 'travel_start':
             pass
         elif msg_type == 'travel_complete':
-            self.current_zone_id = payload.get('zoneId', payload.get('toZoneId', self.current_zone_id))
-            self._save_hunting_zone(self.current_zone_id)
+            zid = payload.get('zoneId', payload.get('toZoneId', None))
+            # Guard against string zone names (same bug as game_state) — only
+            # accept numeric zone ids so comparisons against _hunting_zone_id
+            # stay valid (2026-08-04 travel-loop root cause).
+            if isinstance(zid, int) or (isinstance(zid, str) and zid.isdigit()):
+                self.current_zone_id = int(zid)
+                self._save_hunting_zone(self.current_zone_id)
             self.combat_state = 'IDLE'
             self.travel_complete.set()
             # Clear travel blacklist — we're in a new zone with fresh connections
@@ -1080,6 +1085,12 @@ class CharacterAgent:
         self.gold = char.get('gold', self.gold)
         self.xp = char.get('xp', self.xp)
         self.current_zone_id = char.get('currentZoneId', self.current_zone_id)
+        # Guard: currentZoneId is normally numeric; if it's a name string
+        # (observed "Gludios" in game_state zone.id), keep the numeric value.
+        if isinstance(self.current_zone_id, str) and not self.current_zone_id.isdigit():
+            self.current_zone_id = None
+        elif self.current_zone_id is not None:
+            self.current_zone_id = int(self.current_zone_id)
         self.is_dead = char.get('hp', 0) <= 0
 
         # Base stats
@@ -1090,7 +1101,18 @@ class CharacterAgent:
         # Zone info
         zone = payload.get('zone', {})
         if zone:
-            self.current_zone_id = zone.get('id', self.current_zone_id)
+            zid = zone.get('id')
+            # CRITICAL (2026-08-04 travel-loop root cause): the server's
+            # game_state `zone.id` is sometimes the zone NAME STRING (e.g.
+            # "Gludios") instead of the numeric id — sent while the character
+            # is physically in a hunting ground (64188). Assigning the string
+            # clobbers current_zone_id → every zone comparison fails →
+            # endless "Traveling to 64188" re-travel → manual farm 0-kill loop
+            # (observed 15-min run + 90s capture). char.currentZoneId (set
+            # above from payload.character) holds the correct numeric zone, so
+            # only apply zone.id when it's numeric; otherwise keep it.
+            if isinstance(zid, int) or (isinstance(zid, str) and zid.isdigit()):
+                self.current_zone_id = int(zid)
 
         # Mark connected + log progression
         if not self.session_start:
@@ -2415,7 +2437,15 @@ class CharacterAgent:
         await self._use_best_skill(target_id)
 
     def _save_hunting_zone(self, zone_id: int):
-        """Remember this as our hunting zone — skip town/respawn zones (id=1)."""
+        """Remember this as our hunting zone — skip town/respawn zones (id=1).
+        Only accepts numeric ids — the server sometimes sends zone NAME strings
+        (e.g. "Gludios") in game_state/travel payloads; saving those breaks
+        every zone comparison (2026-08-04 travel-loop root cause)."""
+        if isinstance(zone_id, str):
+            if zone_id.isdigit():
+                zone_id = int(zone_id)
+            else:
+                return
         if zone_id and zone_id != 1:
             self._hunting_zone_id = zone_id
 
