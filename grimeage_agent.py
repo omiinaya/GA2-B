@@ -65,31 +65,19 @@ GEAR_SLOTS = {
     'off_hand',
     'main_hand'}
 JUNK_TYPES = {
-    'material',
     'key'}
+# Crafting materials (type='material') are NEVER junk — they feed the crafting
+# economy (Mithril Alloy, Magical Dust/Shard, Magic/Enchanted/Dark Crystal,
+# Stone of Purity, Leather, Reinforced Bone...). The old blanket `material`
+# rule + over-broad keywords would sell the exact materials every weapon
+# recipe needs (2026-08-04 dagger-craft discovery). Only unambiguous
+# vendor-fodder keywords remain.
 VENDOR_TRASH_KEYWORDS = {
     'old coin',
-    'leather scrap',
-    'fur',
-    'bone',
-    'claw',
-    'dust',
-    'hide',
-    'silk',
-    'skin',
-    'wing',
-    'cloth',
     'rusty',
-    'scrap',
-    'shard',
-    'tooth',
     'broken',
-    'powder',
-    'crystal',
-    'essence',
-    'residue',
-    'fragment',
-    'tentacle'}
+    'torn',
+    'worn'}
 
 def init_db():
     '''Initialize SQLite database for persistent analytics.'''
@@ -4129,12 +4117,16 @@ class CharacterAgent:
             qty = item.get('quantity', 1)
             if item.get('isEquipped') or slot in GEAR_SLOTS:
                 continue
+            if item_type == 'material':
+                # Crafting materials are the crafting economy (Mithril Alloy,
+                # Magical Dust, Magic/Dark Crystal, Leather, Reinforced Bone...).
+                # Never sell them as junk — dagger/gear recipes need them.
+                continue
             is_junk = item_type in JUNK_TYPES
             if not is_junk:
                 for kw in VENDOR_TRASH_KEYWORDS:
                     if kw in name:
                         is_junk = True
-                    
                     if not is_junk:
                         continue
             result = self.sell_item(npc_id, slot, qty)
