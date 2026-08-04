@@ -857,15 +857,29 @@ class CharacterAgent:
             # is_dead based on whether we got a valid HP value.
             if self._respawn_zone:
                 self.current_zone_id = self._respawn_zone
-            elif self.current_zone_id and self.current_zone_id == self._hunting_zone_id:
-                # Connected dead — respawn puts us in town (zone 1)
-                self.current_zone_id = 1
             else:
-                # Character connected dead and game_state had no zone (zone=None).
-                # Neither _respawn_zone nor current_zone_id is set — force to
-                # zone 1 (town, the default respawn zone) so the zone finder
-                # can build reachable_ids from a known position.
-                self.current_zone_id = 1
+                # Connected-dead respawn: _respawn_zone is None (no death event
+                # captured). The old code forced zone 1 (Talking Island) assuming
+                # the default town respawn — but this server respawns high-level
+                # chars to Gludios (149). With the wrong local zone (1), the zone
+                # finder planned travel from zone-1 reachability and the server
+                # (physically in 149) rejected every hop with "no connection" →
+                # stuck-in-town loop, 0 kills (observed 2026-08-04 post-fix run).
+                # Query REST for the authoritative respawn zone instead of guessing.
+                try:
+                    cd = self.rest.get(f'/api/characters/{self.char_id}')
+                    if isinstance(cd, dict):
+                        cz = cd.get('currentZoneId')
+                        if isinstance(cz, int) or (isinstance(cz, str) and cz.isdigit()):
+                            self.current_zone_id = int(cz)
+                        else:
+                            # REST lag/wrong — fall back to old behavior
+                            self.current_zone_id = 1
+                    else:
+                        self.current_zone_id = 1
+                except Exception:
+                    # REST fetch failed — safe fallback so the finder can still run
+                    self.current_zone_id = 1
             self._respawn_zone = None
             self.is_dead = False
             # Update HP from payload if available (server may send post-respawn HP)
