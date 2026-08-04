@@ -319,6 +319,28 @@ async def ensure_all_farming(rest, cid_list):
             _af_fail[cid] = 0
             logmsg.append(f'{CHARACTERS[cid]["name"]}:af:{msg}')
         await asyncio.sleep(3)
+
+    # 4. Priority enforcement: if a HIGHER-priority char is AF-off while a
+    #    LOWER-priority one farms, swap them so the strongest pair holds the
+    #    2 active slots. (Server caps ~2; this guarantees ShieldBot gets in
+    #    ahead of BuffBot whenever a slot frees.)
+    for cid in cid_list:
+        if rest_af(rest, cid) is True:
+            continue  # already farming — fine
+        farmers = [x for x in cid_list if rest_af(rest, x) is True]
+        if not farmers:
+            break
+        # evict the farmer with the LOWEST priority rank
+        victim = max(farmers, key=lambda x: cid_list.index(x))
+        if cid_list.index(victim) < cid_list.index(cid):
+            continue  # victim is higher priority than the waiting char
+        ok, msg = await toggle_af(rest, victim, CHARACTERS[victim], on=False)
+        logmsg.append(f'{CHARACTERS[victim]["name"]}:evict:{msg}')
+        await asyncio.sleep(3)
+        ok, msg = await toggle_af(rest, cid, CHARACTERS[cid], on=True)
+        logmsg.append(f'{CHARACTERS[cid]["name"]}:swap-in:{msg}')
+        await asyncio.sleep(3)
+        break  # one swap per sweep is enough
     return logmsg
 
 
@@ -399,6 +421,13 @@ async def main():
     while _running:
         try:
             await asyncio.sleep(CYCLE_S)
+            # Re-write PID each cycle so the brain's supervision always finds
+            # us (startup write can race with an old instance's cleanup).
+            try:
+                with open(PID_FILE, 'w') as f:
+                    f.write(str(os.getpid()))
+            except OSError:
+                pass
             snap = snapshot(r)
             record_gold(snap)
             changed = []
@@ -426,6 +455,28 @@ async def main():
                             _af_fail[cid] = 0
                             changed.append(f'{CHARACTERS[cid]["name"]}:af:{msg}')
                         await asyncio.sleep(2)
+                # Priority enforcement: if a HIGHER-priority char is AF-off while
+                # a LOWER-priority one farms, swap them so the strongest pair
+                # holds the slots. The server caps ~2 active; this guarantees
+                # e.g. ShieldBot gets in ahead of BuffBot when a slot frees.
+                for cid in cid_list:
+                    if rest_af(r, cid) is True:
+                        continue  # already farming — fine
+                    # find the lowest-priority char currently farming to evict
+                    farmers = [x for x in cid_list if rest_af(r, x) is True]
+                    if not farmers:
+                        break
+                    # evict the farmer with the LOWEST priority rank
+                    victim = max(farmers, key=lambda x: cid_list.index(x))
+                    if cid_list.index(victim) < cid_list.index(cid):
+                        continue  # victim is higher priority than the wait — no swap
+                    ok, msg = await toggle_af(r, victim, CHARACTERS[victim], on=False)
+                    changed.append(f'{CHARACTERS[victim]["name"]}:evict:{msg}')
+                    await asyncio.sleep(3)
+                    ok, msg = await toggle_af(r, cid, CHARACTERS[cid], on=True)
+                    changed.append(f'{CHARACTERS[cid]["name"]}:swap-in:{msg}')
+                    await asyncio.sleep(3)
+                    break  # one swap per cycle is enough
             if changed:
                 log('cycle ' + ' | '.join(changed))
             if time.time() - last_rate_log >= RATE_WINDOW_S:
