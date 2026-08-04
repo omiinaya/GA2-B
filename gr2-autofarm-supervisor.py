@@ -269,9 +269,24 @@ async def ensure_all_farming(rest, cid_list):
     af_off = [cid for cid in cid_list
               if cid not in dead and cid not in out_of_zone and rest_af(rest, cid) is not True]
 
-    # 1. Fix dead chars — their slot is FREE, no disruption needed.
+    # 1. Fix dead chars. Only resurrect if high-priority OR fewer than 2 farmers
+    #    are active — resurrecting a disposable 3rd wheel by pausing a working
+    #    farmer costs more output than the resurrection gains (the swap will
+    #    just evict it again). A dead low-priority char waits until a slot frees.
     for cid in dead:
         cfg = CHARACTERS[cid]
+        farmers = [x for x in cid_list if x != cid and rest_af(rest, x) is True]
+        if len(farmers) >= 2:
+            # 2 farmers busy — only resurrect if this char is in the top-2 slots
+            if cid_list.index(cid) >= 2:
+                logmsg.append(f'{cfg["name"]}:defer (2 farmers busy, low priority)')
+                continue
+            victim = max(farmers, key=lambda x: cid_list.index(x))
+            ok, msg = await toggle_af(rest, victim, CHARACTERS[victim], on=False)
+            logmsg.append(f'{CHARACTERS[victim]["name"]}:pause:{msg}')
+            await asyncio.sleep(3)
+        else:
+            victim = None
         ok, msg = await respawn_char(rest, cid, cfg)
         logmsg.append(f'{cfg["name"]}:respawn:{msg}')
         await asyncio.sleep(3)
@@ -279,10 +294,15 @@ async def ensure_all_farming(rest, cid_list):
         ok, msg = await travel_to_zone(rest, cid, cfg, CHAR_ZONE.get(cid, PARTY_ZONE))
         logmsg.append(f'{cfg["name"]}:travel:{msg}')
         await asyncio.sleep(3)
-        # and toggle AF on while we have the WS
+        # toggle AF on (it'll be swapped out later if a higher-priority char waits)
         if rest_af(rest, cid) is not True:
             ok, msg = await toggle_af(rest, cid, cfg, on=True)
             logmsg.append(f'{cfg["name"]}:af:{msg}')
+            await asyncio.sleep(3)
+        # restore the paused farmer
+        if victim is not None and rest_af(rest, victim) is not True:
+            ok, msg = await toggle_af(rest, victim, CHARACTERS[victim], on=True)
+            logmsg.append(f'{CHARACTERS[victim]["name"]}:resume:{msg}')
             await asyncio.sleep(3)
 
     # 2. Fix live chars out of zone. Count how many farmers hold slots; if all
