@@ -74,10 +74,22 @@ async def main():
         znames[c['currentZoneId']] = state.get_zone_name(c['currentZoneId'])
 
     # ─────────────────────────────────────────────────
-    # 0. SUPERVISE COMBAT DAEMON
+    # 0. SUPERVISE AUTO-FARM SUPERVISOR (was: combat daemon)
     # ─────────────────────────────────────────────────
-    daemon_pid_file = os.path.expanduser('~/.hermes/gr2-combat-daemon.pid')
-    daemon_script = os.path.expanduser('~/.hermes/scripts/gr2-combat-daemon.py')
+    # The manual-party combat daemon is DEAD since the 1-WS-per-account server
+    # change (2026-08-04). The autofarm supervisor (gr2-autofarm-supervisor.py)
+    # is the winning strategy: it keeps all chars auto-farming simultaneously
+    # via sequential brief-WS toggles. Prefer it; fall back to the old daemon
+    # only if the supervisor file is missing.
+    daemon_dir = os.path.expanduser('~/.hermes/scripts')
+    supervisor_script = os.path.join(daemon_dir, 'gr2-autofarm-supervisor.py')
+    combat_daemon_script = os.path.join(daemon_dir, 'gr2-combat-daemon.py')
+    if os.path.exists(supervisor_script):
+        daemon_script = supervisor_script
+        daemon_pid_file = os.path.expanduser('~/.hermes/gr2-autofarm-supervisor.pid')
+    else:
+        daemon_script = combat_daemon_script
+        daemon_pid_file = os.path.expanduser('~/.hermes/gr2-combat-daemon.pid')
     daemon_running = False
     if os.path.exists(daemon_pid_file):
         try:
@@ -93,7 +105,8 @@ async def main():
             except OSError:
                 pass
     if not daemon_running:
-        print(f"  🔧 Combat daemon not running — starting it...")
+        label = 'Autofarm supervisor' if os.path.exists(supervisor_script) else 'Combat daemon'
+        print(f"  🔧 {label} not running — starting it...")
         subprocess.Popen(
             [sys.executable, daemon_script],
             stdout=open(LOG_FILE, 'a'),
@@ -101,10 +114,10 @@ async def main():
             stdin=subprocess.DEVNULL,
             start_new_session=True
         )
-        print(f"  ✅ Combat daemon launched (check logs: {LOG_FILE})")
+        print(f"  ✅ {label} launched (check logs: {LOG_FILE})")
     else:
         pid = int(open(daemon_pid_file).read().strip())
-        print(f"  ✅ Combat daemon running (PID {pid})")
+        print(f"  ✅ Supervisor/daemon running (PID {pid})")
 
     # ─────────────────────────────────────────────────
     # 1. CHARACTER STATUS REPORT
