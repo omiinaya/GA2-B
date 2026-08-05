@@ -21,6 +21,10 @@ from ga_config import ACCOUNT_EMAIL, ACCOUNT_PASSWORD
 # HermesHeal (bishop) -> zone 53 (safe relocation 2026-08-05)
 # ShieldBot (warlord) -> zone 64188 (Windy Meadow Gates, Lv21-24)
 CHAR_ZONE = {1069: 53, 1070: 53, 1071: 64188}
+# Safe city where the supervisor shelters rotated-out chars while they rest
+# between farm slots (2026-08-05). A char idle here AF-off is NORMAL, not an
+# alert — it's waiting its rotation turn.
+SAFE_ZONE = 149
 
 
 def main():
@@ -71,7 +75,9 @@ def main():
     for c in per_char:
         name, lv, zone, target, state = c['name'], c['lv'], c['zone'], c['target'], c['state']
         hp, max_hp = c['hp'], c['max_hp']
-        if zone != target:
+        # A char resting AF-off in the safe city is rotation-sheltered (normal).
+        sheltered = (not c['farming']) and zone == SAFE_ZONE and state != 'dead'
+        if zone != target and not sheltered:
             issues.append(f'{name} (Lv{lv}): WRONG ZONE {zone} (should be {target}) | State:{state}')
         elif state == 'dead' or hp <= 0:
             issues.append(f'{name} (Lv{lv}): DEAD at zone {zone}!')
