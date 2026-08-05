@@ -3842,7 +3842,8 @@ class CharacterAgent:
             if best:
                 res = self.equip_item(best.get('id') or best.get('inventoryId'))
                 self.analytics.log(f"[{self.name}] Auto-equipped {best.get('itemName')} "
-                                   f"({'m_atk' if stat_idx else 'p_atk'}={best_val}) — was {cur_best}")
+                                   f"({'m_atk' if stat_idx else 'p_atk'}={best_val}) — was {cur_best} "
+                                   f"(class={getattr(self, 'char_class', '?')!r})")
                 return res
             return None
         except Exception as e:
