@@ -4525,24 +4525,25 @@ class CharacterAgent:
             'amount': amount })
 
     
-    def warehouse_items(self):
-        '''Get items stored in warehouse.'''
-        data = self.rest.get(f'''/api/warehouse/{self.char_id}/items''')
+    def warehouse_items(self, npc_id=1051):
+        '''Get items stored in the ACCOUNT-SHARED warehouse (keyed by warehouse
+        NPC id 1051 = Gludios clerk, NOT characterId; corrected 2026-08-05).'''
+        data = self.rest.get(f'''/api/warehouse/{npc_id}/items''')
         if isinstance(data, list):
             return data
         if isinstance(data, dict) and 'items' in data:
             return data['items']
 
     
-    def warehouse_deposit_item(self, inventory_slot=None, quantity=None):
-        return self.rest.post(f'''/api/warehouse/{self.char_id}/deposit''', {
+    def warehouse_deposit_item(self, inventory_slot=None, quantity=None, npc_id=1051):
+        return self.rest.post(f'''/api/warehouse/{npc_id}/deposit''', {
             'characterId': self.char_id,
             'inventorySlot': inventory_slot,
             'quantity': quantity })
 
     
-    def warehouse_withdraw_item(self, inventory_slot=None, quantity=None):
-        return self.rest.post(f'''/api/warehouse/{self.char_id}/withdraw''', {
+    def warehouse_withdraw_item(self, inventory_slot=None, quantity=None, npc_id=1051):
+        return self.rest.post(f'''/api/warehouse/{npc_id}/withdraw''', {
             'characterId': self.char_id,
             'inventorySlot': inventory_slot,
             'quantity': quantity })
