@@ -124,3 +124,17 @@ Deep-dive results from client JS (`/tmp/gr2chunks/`) + live API probes.
   Magic Mastery 60k at Lv24/25), ShieldBot 126,890 -> 80,000 (deposited),
   HermesHeal 24,154 -> 65,827, warehouse 129,050 -> 6,003. Pool fully
   redistributed. Gold economy is now self-balancing.
+
+### Progression pass for the PERMANENT farmer (2026-08-05 17:10, root cause)
+- DISCOVERY: BuffBot holds one of the 2 farm slots permanently (rotation only
+  swaps the 3rd between HermesHeal and ShieldBot), so the supervisor NEVER
+  WS-connects him → his connect-path progression NEVER ran: auto-equip
+  (farmed with Mithril Stiletto m_atk 36 while Arcane Staff m_atk 55 sat in
+  the bag — 53% m_atk loss), auto-train, talisman craft, quest accept/claim.
+  Only rotated chars (ShieldBot) produced progression lines in the journal.
+- FIX: supervisor-level `progression_pass()` briefly connects EVERY char
+  (serial, ~3s each) on a timer (GR2_PROGRESSION, default 20 min), firing
+  the connect-path wiring for all chars regardless of rotation status.
+- connect() does NOT start manual combat (combat_enabled False) — safe to
+  run during AF farming. Verified: manual Arcane Staff equip worked
+  (m_atk 36 → 55); the 20-min pass makes it automatic going forward.
