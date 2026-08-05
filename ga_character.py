@@ -754,6 +754,11 @@ class CharacterAgent:
             # Train affordable skills + claim completed quest rewards once at
             # connect (2026-08-04 progression wiring — cheap high-ROI upgrades).
             self._auto_train_skills()
+            # 2026-08-05: freshly-ascended chars get class skills added to the
+            # config with autoEnabled=FALSE — enable them so the rotation
+            # actually uses Fireball/Smite/Power Smash (BuffBot farmed without
+            # Touch of Flame power-80 until this was added).
+            self._auto_enable_class_skills()
             self._claim_completed_quests()
             # 2026-08-05: buy the best class weapon from the shop (remote buy
             # works — no city gate) so ascended casters don't farm with swords.
@@ -3879,6 +3884,59 @@ class CharacterAgent:
             return trained
         except Exception as e:
             self.analytics.log(f"[{self.name}] auto-train failed: {e}")
+            return 0
+
+    def _auto_enable_class_skills(self):
+        """Enable any disabled non-passive skills in the rotation config.
+
+        Discovery (2026-08-05): after ascension, the server adds class skills
+        (Fireball, Touch of Flame, Holy Bolt, Smite, Power Smash...) to the
+        config with autoEnabled=FALSE. The agent previously loaded the config
+        as-is, so a freshly-ascended char farmed WITHOUT its class DPS skills
+        (BuffBot died repeatedly in zone 53 while Touch of Flame power-80 sat
+        disabled; enabling it + Magic Mastery + the Arcane Staff m_atk fix
+        turned the same gear into a working farmer).
+
+        Only non-passive skills are enabled here (passives apply server-side
+        regardless; leaving them off avoids config churn). Enabled skills are
+        re-prioritized: damage/debuff skills jump to the front (prio 4-5),
+        heals/buffs keep their gated priorities (30+). The PUT requires the
+        full {skills, rules, petControl} body — sending only 'skills' would
+        drop the rules (403/None failure mode documented 2026-08-05).
+        """
+        try:
+            conf_data = self.rest.get(f'/api/skills/config/{self.char_id}')
+            if not isinstance(conf_data, dict):
+                return 0
+            confs = conf_data.get('configs') or []
+            rules = conf_data.get('rules')
+            pet = conf_data.get('petControl')
+            enabled = 0
+            for c in confs:
+                if c.get('autoEnabled'):
+                    continue
+                sid = c.get('skillId')
+                info = next((s for s in self.skills if s.get('id') == sid), None)
+                if not info:
+                    continue
+                if info.get('isPassive'):
+                    continue  # passives apply server-side; leave off
+                c['autoEnabled'] = True
+                # Damage/debuff skills belong near the front of the rotation
+                # (below the core attack skills at prio 1-3, above heals at 30+).
+                c['autoPriority'] = 4
+                enabled += 1
+            if enabled:
+                body = {'skills': confs, 'rules': rules, 'petControl': pet}
+                res = self.rest.put(f'/api/skills/config/{self.char_id}', body)
+                if isinstance(res, dict) and res.get('status') == 'ok':
+                    self.analytics.log(f'[{self.name}] ⚡ Enabled {enabled} class skills in rotation config')
+                    self._load_skills_from_rest()
+                else:
+                    self.analytics.log(f'[{self.name}] enable-class-skills PUT failed: {res}')
+            return enabled
+        except Exception as e:
+            self.analytics.log(f'[{self.name}] auto-enable-class-skills failed: {e}')
             return 0
 
     def fetch_shop_inventory(self, npc_id=None):
