@@ -52,9 +52,13 @@ RATE_WINDOW_S = int(os.environ.get('GR2_RATE_WINDOW', '600'))  # gold-rate windo
 # (Windmill Plains South, Lv20-22) is his survivable zone AND a Trial of
 # Ascendancy quest zone (Bandit Scouts) — he survives + produces there (measured
 # ~16-56k/hr, HP stable, no deaths). The Lv23 pair handle 64188.
+# 2026-08-05: HermesHeal (bishop, Lv24) kept dying in 64188 (Lv24 Dire Wolves)
+# despite heal-first rotation — moved her to zone 53 with BuffBot so the
+# healer survives (user rule: nobody dies). ShieldBot (warlord, full Steel)
+# holds 64188 alone.
 CHAR_ZONE = {
     1069: 53,     # BuffBot    — Windmill Plains South (Lv20-22, safe + quest)
-    1070: 64188,  # HermesHeal — Windy Meadow Gates (Lv21-24)
+    1070: 53,     # HermesHeal — Windmill Plains South (Lv20-22, safe for caster)
     1071: 64188,  # ShieldBot  — Windy Meadow Gates (Lv21-24)
 }
 
@@ -228,6 +232,12 @@ async def respawn_char(rest, cid, cfg, max_s=30):
 
 async def travel_to_zone(rest, cid, cfg, target=PARTY_ZONE, max_s=25):
     """Travel a LIVE char to a zone. Assumes a WS slot is free.
+
+    2026-08-05 fix: the server only accepts ADJACENT hops. Single-hop
+    {'path':[target]} fails for non-adjacent zones (e.g. 64188->53 is
+    64188->52817->53) — the char stayed put and kept dying in the lethal
+    zone. Build a multi-hop path from the world map and travel hop-by-hop,
+    waiting for each hop to land (coordinator pattern).
     Returns (ok, msg)."""
     st = rest_state(rest, cid)
     if not st:
@@ -254,18 +264,38 @@ async def travel_to_zone(rest, cid, cfg, target=PARTY_ZONE, max_s=25):
             await asyncio.sleep(0.3)
         except Exception:
             pass
-        await a.ws_send('start_travel', {'path': [target]})
+        # Build the hop list (adjacent-only). Fall back to direct if unknown.
+        path = None
+        try:
+            if a.world is None:
+                from grimeage_agent import WorldData
+                a.world = WorldData(a.rest)
+                a.world.load()
+            if a.world and a.world._loaded and a.world.adjacency:
+                path = a.world.find_path(a.current_zone_id, target)
+        except Exception:
+            path = None
+        if not (path and len(path) >= 2):
+            path = [a.current_zone_id, target]
+        # Travel hop-by-hop; the server rejects non-adjacent single hops.
         a.combat_state = 'TRAVELING'
-        t0 = time.time()
-        while time.time() - t0 < max_s:
-            await asyncio.sleep(0.5)
+        for hop_idx in range(1, len(path)):
+            hop = path[hop_idx]
+            a.travel_complete.clear()
+            await a.ws_send('start_travel', {'path': [hop]})
+            t0 = time.time()
+            while time.time() - t0 < max_s:
+                await asyncio.sleep(0.5)
+                c = rest_state(a.rest, cid)
+                if c and c.get('zone') == hop:
+                    break
             c = rest_state(a.rest, cid)
-            if c and c.get('zone') == target and (c.get('hp') or 0) > 0:
-                return True, f'arrived-{target}'
+            if not c or c.get('zone') != hop:
+                return False, f'travel-timeout-still-{c.get("zone") if c else "?"}'
         c = rest_state(a.rest, cid)
         if c and c.get('zone') == target:
-            return True, f'arrived-{target}-rest'
-        return False, f'travel-timeout-still-{c.get("zone") if c else "?"}'
+            return True, f'arrived-{target}'
+        return False, f'travel-failed-{c.get("zone") if c else "?"}'
     finally:
         await a.disconnect()
 
