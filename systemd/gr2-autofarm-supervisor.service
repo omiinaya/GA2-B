@@ -1,0 +1,23 @@
+[Unit]
+Description=GrimeAge2 Auto-Farm Supervisor (3-char farm keeper)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=hindsight
+Group=hindsight
+ExecStart=/usr/bin/python3 -u /home/hindsight/.hermes/scripts/gr2-autofarm-supervisor.py
+WorkingDirectory=/home/hindsight/.hermes/scripts
+Environment="HOME=/home/hindsight"
+Environment="PATH=/usr/local/bin:/usr/bin:/bin"
+Restart=always
+RestartSec=10
+KillMode=mixed
+KillSignal=SIGTERM
+TimeoutStopSec=30
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
