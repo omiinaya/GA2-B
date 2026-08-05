@@ -759,6 +759,11 @@ class CharacterAgent:
             # actually uses Fireball/Smite/Power Smash (BuffBot farmed without
             # Touch of Flame power-80 until this was added).
             self._auto_enable_class_skills()
+            # 2026-08-05: continuous gold pooling — deposit surplus to the
+            # shared warehouse / withdraw if broke, so training + crafting
+            # floors are met for every char (BuffBot needs 150k+ at Lv25).
+            # Runs BEFORE _auto_train_skills so affordability uses pooled gold.
+            self._auto_pool_gold()
             self._auto_accept_quests()
             self._claim_completed_quests()
             # 2026-08-05: buy the best class weapon from the shop (remote buy
@@ -4523,6 +4528,52 @@ class CharacterAgent:
         return self.rest.post(f'''/api/warehouse/{npc_id}/withdraw-gold''', {
             'characterId': self.char_id,
             'amount': amount })
+
+    
+    def _auto_pool_gold(self, npc_id=1051, keep=80000, fill_to=150000):
+        """Redistribute gold through the ACCOUNT-SHARED warehouse (NPC 1051).
+
+        Runs on each char's connect. Two directions:
+        - If THIS char has a big surplus (gold > keep), deposit the excess to
+          the shared pool so broke chars (BuffBot needs 150k for Fireball Lv2
+          at Lv25) can be funded.
+        - If THIS char is broke (gold < keep) AND the pool has funds, withdraw
+          up to fill_to so training/crafting floors are met.
+
+        Never lets a char drop below `keep` (farming liquidity), and never
+        withdraws more than the pool holds. Gold pooling was previously
+        manual-only (gr2-pool-gear.py, one-shot) — this makes it continuous.
+
+        Returns (direction, amount) or None if no action.
+        """
+        try:
+            gold = self.gold or 0
+            pool = self.warehouse_gold(npc_id) or 0
+            if gold > keep:
+                excess = gold - keep
+                res = self.rest.post(f'/api/warehouse/{npc_id}/deposit-gold', {
+                    'characterId': self.char_id,
+                    'amount': excess})
+                if isinstance(res, dict) and res.get('status') == 'ok':
+                    self.gold = keep
+                    self.analytics.log(f"[{self.name}] 🏦 Pooled {excess} gold (kept {keep})")
+                    return ('deposit', excess)
+            elif gold < keep and pool >= 10000:
+                # Broke — pull from the pool up to fill_to (capped by pool).
+                # Min pool 10k: avoid dribbling tiny amounts (churn).
+                want = min(fill_to - gold, pool)
+                if want > 0:
+                    res = self.rest.post(f'/api/warehouse/{npc_id}/withdraw-gold', {
+                        'characterId': self.char_id,
+                        'amount': want})
+                    if isinstance(res, dict) and res.get('status') == 'ok':
+                        self.gold = gold + want
+                        self.analytics.log(f"[{self.name}] 🏦 Withdrew {want} from pool")
+                        return ('withdraw', want)
+            return None
+        except Exception as e:
+            self.analytics.log(f"[{self.name}] auto-pool failed: {e}")
+            return None
 
     
     def warehouse_items(self, npc_id=1051):

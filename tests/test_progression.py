@@ -152,6 +152,63 @@ def test_enable_class_skills_nothing_to_enable():
     assert not any(c[0] == 'PUT' for c in rest.calls)
 
 
+# --- _auto_pool_gold -----------------------------------------
+
+def test_pool_deposit_surplus():
+    a, rest = _agent(gold=300000)  # surplus over keep=80000
+    # pool balance endpoint returns {'gold': N}; deposit returns ok
+    rest.responses['/api/warehouse/1051/gold'] = {'gold': 0}
+    rest.responses['deposit-gold'] = {'status': 'ok'}
+    r = a._auto_pool_gold(keep=80000, fill_to=150000)
+    assert r == ('deposit', 220000)  # 300k - 80k
+    assert a.gold == 80000
+    deposit_calls = [c for c in rest.calls if 'deposit-gold' in c[1]]
+    assert deposit_calls
+
+
+def test_pool_withdraw_when_broke():
+    a, rest = _agent(gold=10000)  # broke (below keep=80000)
+    rest.responses['/api/warehouse/1051/gold'] = {'gold': 200000}  # pool rich
+    rest.responses['withdraw-gold'] = {'status': 'ok'}
+    r = a._auto_pool_gold(keep=80000, fill_to=150000)
+    # want = min(fill_to - gold, pool) = min(140000, 200000) = 140000
+    assert r == ('withdraw', 140000)
+    assert a.gold == 150000
+    withdraw_calls = [c for c in rest.calls if 'withdraw-gold' in c[1]]
+    assert withdraw_calls
+
+
+def test_pool_withdraw_capped_by_pool():
+    a, rest = _agent(gold=10000)  # broke
+    rest.responses['/api/warehouse/1051/gold'] = {'gold': 30000}  # pool low
+    rest.responses['withdraw-gold'] = {'status': 'ok'}
+    a._auto_pool_gold(keep=80000, fill_to=150000)
+    # want = min(fill_to - gold, pool) = min(140000, 30000) = 30000
+    assert a.gold == 40000  # 10k + 30k
+
+
+def test_pool_no_action_middle():
+    a, rest = _agent(gold=60000)  # between keep(80k)... under keep, but pool too low
+    rest.responses['/api/warehouse/1051/gold'] = {'gold': 5000}  # pool < keep-gold
+    assert a._auto_pool_gold(keep=80000, fill_to=150000) is None
+    assert not any('warehouse/1051' in c[1] and c[0] == 'POST' for c in rest.calls)
+
+
+def test_pool_withdraw_skipped_when_pool_low():
+    a, rest = _agent(gold=10000)
+    rest.responses['/api/warehouse/1051/gold'] = {'gold': 1000}  # pool too low
+    assert a._auto_pool_gold(keep=80000, fill_to=150000) is None
+    assert not any('withdraw-gold' in c[1] for c in rest.calls)
+
+
+def test_pool_surplus_balanced_no_op():
+    # gold exactly at keep -> no action
+    a, rest = _agent(gold=80000)
+    rest.responses['/api/warehouse/1051/gold'] = {'gold': 50000}
+    assert a._auto_pool_gold(keep=80000, fill_to=150000) is None
+    assert not any('warehouse/1051' in c[1] and c[0] == 'POST' for c in rest.calls)
+
+
 # --- _auto_craft_talisman ------------------------------------
 
 def test_talisman_craft_skips_when_already_equipped():
