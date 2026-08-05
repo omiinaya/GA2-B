@@ -131,7 +131,8 @@ def test_skill_gated_mp_threshold():
 
 def test_skill_gated_both_bounds():
     a, _ = _agent()
-    cfg = {'gateSelfHpMin': 20, 'gateSelfHpMax': 80, 'gateSelfMpMin': 0, 'gateSelfMpMax': 100}
+    cfg = {'gateSelfHpMin': 20, 'gateSelfHpMax': 80,
+           'gateSelfMpMin': 0, 'gateSelfMpMax': 100}
     assert a._is_skill_gated(cfg, 0.5, 0.5) is False  # within bounds
     assert a._is_skill_gated(cfg, 0.1, 0.5) is True   # too low HP
     assert a._is_skill_gated(cfg, 0.9, 0.5) is True   # too high HP
@@ -162,7 +163,9 @@ def test_skill_efficiency_unknown_skill():
 # --- _get_current_weapon -------------------------------------
 
 def test_current_weapon_slot_based():
-    a, _ = _agent(equipped_gear=[{'slot': 'main_hand', 'itemName': 'Mithril Greatsword'}])
+    a, _ = _agent(equipped_gear=[
+        {'slot': 'main_hand', 'itemName': 'Mithril Greatsword'},
+    ])
     assert a._get_current_weapon() == 'Mithril Greatsword'
 
 
