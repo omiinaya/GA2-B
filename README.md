@@ -9,9 +9,13 @@ server's built-in **auto-farm** mode.
 
 | File | Role |
 |------|------|
-| `grimeage_agent.py` (~5000 lines) | Main agent. `CharacterAgent` (WebSocket/REST client, combat AI, empirical skill profiler, rest/regen management, threat-based tank targeting) + `AgentCoordinator` (3-char party orchestration) |
-| `gr2-combat-daemon.py` | Headless party daemon — connects all 3 chars, forms party, enables manual combat AI, manages monster reseeds. Supervised by the brain. |
-| `gr2-brain.py` | Cron supervisor (every 5 min): zone progression, gear, quests, skill rotations; auto-starts/restarts the combat daemon; clears stale cron lock. |
+| `grimeage_agent.py` | Public API shim — re-exports the modular agent (CharacterAgent combat AI, empirical skill profiler, rest/regen, threat-based tank targeting) + AgentCoordinator |
+| `ga_*.py` (9 modules) | The split monolith: config, catalog (weapon/armor trees), REST client, world data, gear helpers, character (combat AI + progression wiring), analytics, coordinator |
+| `gr2-autofarm-supervisor.py` | **Persistent 3-char auto-farm supervisor** — keeps every char alive, in-zone, and farming. REST-state-aware AF toggles, fair rotation through the 2-farmer slot cap, safe-zone sheltering for rotated-out chars. Runs as a systemd service (`systemd/gr2-autofarm-supervisor.service`) |
+| `gr2-watchdog.py` | Watchdog (15-min cron): alerts on real farm degradation (dead / wrong zone / >1 char idle / service down), silent when healthy |
+| `gr2-pool-gear.py` | Remote-only gold-pool + gear-up pass (warehouse NPC 1051, works from hunting zones) |
+| `gr2-combat-daemon.py` / `gr2-brain.py` | Legacy manual-party daemon + cron brain (superseded by the supervisor; kept for reference) |
+| `_autostar.py` | Best-effort one-time GitHub star of the upstream repo (token-gated, silent) |
 
 ## Architecture
 
@@ -40,6 +44,29 @@ cp grimeage_agent.py     /home/hindsight/grimeage_agent.py
 cp gr2-combat-daemon.py ~/.hermes/scripts/gr2-combat-daemon.py
 cp gr2-brain.py         ~/.hermes/scripts/gr2-brain.py
 ```
+
+**Current production stack (2026-08-05):**
+
+1. **Supervisor as a systemd service** (auto-restart on crash/reboot):
+   ```bash
+   cp systemd/gr2-autofarm-supervisor.service /etc/systemd/system/
+   su-run 'systemctl daemon-reload && systemctl enable --now gr2-autofarm-supervisor.service'
+   systemctl status gr2-autofarm-supervisor   # active
+   ```
+   Logs: `journalctl -u gr2-autofarm-supervisor -n 50` and
+   `~/.hermes/gr2-autofarm-supervisor.log`. PID: `~/.hermes/gr2-autofarm-supervisor.pid`.
+
+2. **Watchdog cron** (15-min, silent unless degraded):
+   ```bash
+   cp gr2-watchdog.py ~/.hermes/scripts/gr2-watchdog.py
+   # cron job: every 15m, no_agent, script=gr2-watchdog.py, deliver=origin
+   ```
+
+3. Sync the runtime copies from the repo:
+   ```bash
+   for f in ga_*.py gr2-*.py grimeage_agent.py; do cp "$f" ~/.hermes/scripts/; done
+   # then: su-run 'systemctl restart gr2-autofarm-supervisor.service'
+   ```
 
 Credentials (never committed): `GR2_EMAIL` / `GR2_PASSWORD` env vars, or a
 `.env` file next to the scripts (`KEY=VALUE` lines).
