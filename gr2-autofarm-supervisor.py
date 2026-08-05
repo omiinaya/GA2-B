@@ -403,7 +403,21 @@ async def ensure_char_working(rest, cid, cid_list, target_zone):
     if rest_af(rest, cid) is not True:
         others_farming = sum(1 for x in cid_list if x != cid and rest_af(rest, x) is True)
         if others_farming >= 2:
-            out.append(f'{cfg["name"]}:af-wait (2 slots held, rotation governs)')
+            # Rotation-idle: both farm slots are held. SAFETY (2026-08-05): do
+            # NOT leave this char standing in the hunting zone — it's monster
+            # bait (HermesHeal death pattern). Shelter it in the safe city so
+            # it rests safely while it waits for its rotation turn. rotate_slots
+            # will travel it back + resume farming when the slot frees.
+            if cid not in _sheltered and st.get('zone') != SAFE_ZONE:
+                try:
+                    ok_t, msg_t = await travel_to_zone(rest, cid, cfg, SAFE_ZONE)
+                    if ok_t:
+                        _sheltered[cid] = time.time()
+                    out.append(f'{cfg["name"]}:af-wait-sheltered:{msg_t}')
+                except Exception as e:
+                    out.append(f'{cfg["name"]}:af-wait-shelter-fail:{e}')
+            else:
+                out.append(f'{cfg["name"]}:af-wait (2 slots held, rotation governs)')
             return out
         if time.time() - _last_attempt[cid] < (2 ** _fail[cid]) * 10:
             st2 = rest_state(rest, cid)
@@ -590,6 +604,15 @@ async def main():
     record_gold(snap)
 
     cid_list = list(ORDER)
+    # RECOVER SHELTER STATE after a restart (2026-08-05): _sheltered is
+    # in-memory, so a crash/restart loses it. Any char resting AF-off in the
+    # safe city from a prior rotation would otherwise get dragged back to its
+    # hunting zone by ensure_char_working. Re-mark them sheltered on boot.
+    for cid in cid_list:
+        st = rest_state(r, cid)
+        if st and (st.get('hp') or 0) > 0 and st.get('zone') == SAFE_ZONE and rest_af(r, cid) is not True:
+            _sheltered[cid] = time.time()
+            log(f'start: recovered shelter for {CHARACTERS[cid]["name"]} (in {SAFE_ZONE})')
     logmsg = await ensure_all_farming(r, cid_list)
     for m in logmsg:
         log(m)
