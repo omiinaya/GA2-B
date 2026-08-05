@@ -4328,7 +4328,11 @@ class CharacterAgent:
                     continue
                 res = self.rest.post(f'/api/quests/{qid}/accept', {
                     'characterId': self.char_id})
-                if isinstance(res, dict) and res.get('status') == 'ok':
+                # The accept endpoint returns {'status': 'accepted'} (NOT 'ok')
+                # — verified live 2026-08-05. Accept any of the known success
+                # statuses so the count + log actually fire.
+                ok_status = isinstance(res, dict) and res.get('status') in ('ok', 'accepted')
+                if ok_status:
                     accepted += 1
                     self.analytics.log(f"[{self.name}] 📜 Accepted quest: {name}")
             return accepted
@@ -4375,7 +4379,12 @@ class CharacterAgent:
                     try:
                         res = self.rest.post(f'/api/quests/{qid}/{action}', {
                             'characterId': self.char_id})
-                        if isinstance(res, dict) and res.get('status') == 'ok':
+                        # Quest endpoints return action-specific success statuses
+                        # ('advanced'/'completed'/'claimed'/'accepted'/'ok') — NOT
+                        # a uniform 'ok'. Treat all of them as success (verified
+                        # live 2026-08-05: advance→'advanced', complete→'completed',
+                        # claim→'claimed', accept→'accepted').
+                        if isinstance(res, dict) and res.get('status'):
                             claimed += 1
                             self.analytics.log(f"[{self.name}] ✅ quest {action}: {q.get('name')}")
                     except Exception:
