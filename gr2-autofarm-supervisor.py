@@ -86,6 +86,7 @@ ORDER = [1069, 1070, 1071]
 # pausing whichever farmer has farmed the longest. Nobody is permanently
 # sidelined; everyone contributes and levels.
 ROTATE_S = int(os.environ.get('GR2_ROTATE', '300'))  # rotate every 5 min default
+POOL_S = int(os.environ.get('GR2_POOL', '300'))     # gold-pool cycle cadence (5 min)
 _last_rotation = 0.0
 _farmer_started = {}   # cid -> timestamp when it started farming (for rotation fairness)
 
@@ -600,6 +601,48 @@ async def rotate_slots(rest, cid_list, target_zone=PARTY_ZONE):
     return out
 
 
+async def pool_gold_cycle(rest, cid_list, npc_id=1051, keep=80000, fill_to=150000):
+    """Redistribute gold through the ACCOUNT-SHARED warehouse (NPC 1051).
+
+    Runs EVERY supervisor cycle (not just on connect) so the permanent
+    farmers (e.g. BuffBot, who never gets toggled by rotation) also get
+    pooled. Rules:
+    - gold > keep   -> deposit surplus (keep = farming liquidity floor).
+    - gold < keep   -> withdraw up to fill_to if the pool has >= 10k
+      (broke chars get funded for training/crafting).
+    Never drops a char below keep; never overdraws the pool.
+    Returns list of log lines.
+    """
+    out = []
+    try:
+        pool = (rest.get(f'/api/warehouse/{npc_id}/gold') or {}).get('gold') or 0
+        for cid in cid_list:
+            d = rest.get(f'/api/characters/{cid}')
+            if not isinstance(d, dict):
+                continue
+            gold = d.get('gold') or 0
+            name = CHARACTERS[cid]['name']
+            if gold > keep:
+                excess = gold - keep
+                res = rest.post(f'/api/warehouse/{npc_id}/deposit-gold', {
+                    'characterId': cid, 'amount': excess})
+                if isinstance(res, dict) and res.get('status') == 'ok':
+                    pool += excess
+                    out.append(f'{name}:pool-deposit:{excess}')
+            elif gold < keep and pool >= 10000:
+                want = min(fill_to - gold, pool)
+                if want > 0:
+                    res = rest.post(f'/api/warehouse/{npc_id}/withdraw-gold', {
+                        'characterId': cid, 'amount': want})
+                    if isinstance(res, dict) and res.get('status') == 'ok':
+                        pool -= want
+                        out.append(f'{name}:pool-withdraw:{want}')
+        return out
+    except Exception as e:
+        log(f'pool cycle error: {e}')
+        return out
+
+
 async def main():
     global _last_rotation
     r = RestClient(ACCOUNT_EMAIL, ACCOUNT_PASSWORD)
@@ -634,6 +677,7 @@ async def main():
 
     # Persistent loop — keep ALL chars alive + farming. Never defer anyone.
     last_rate_log = time.time()
+    last_pool = 0.0
     while _running:
         try:
             await asyncio.sleep(CYCLE_S)
@@ -659,6 +703,13 @@ async def main():
                     _fail[cid] = 0
                     _farmer_started.setdefault(cid, time.time())
                 await asyncio.sleep(1)
+            # GOLD POOLING (2026-08-05): balance all chars through the shared
+            # warehouse every cycle. Runs at supervisor level so even the
+            # permanent farmer (BuffBot, never toggled by rotation) gets pooled.
+            if time.time() - last_pool >= POOL_S:
+                pool_lines = await pool_gold_cycle(r, cid_list)
+                changed.extend(pool_lines)
+                last_pool = time.time()
             # FAIR ROTATION: periodically swap an idle-but-healthy char into a
             # farm slot so no one is permanently sidelined by the 2-farmer cap.
             if time.time() - _last_rotation >= ROTATE_S:
