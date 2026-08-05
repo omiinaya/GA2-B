@@ -87,6 +87,7 @@ ORDER = [1069, 1070, 1071]
 # sidelined; everyone contributes and levels.
 ROTATE_S = int(os.environ.get('GR2_ROTATE', '300'))  # rotate every 5 min default
 POOL_S = int(os.environ.get('GR2_POOL', '300'))     # gold-pool cycle cadence (5 min)
+PROGRESSION_S = int(os.environ.get('GR2_PROGRESSION', '1200'))  # progression pass (20 min)
 _last_rotation = 0.0
 _farmer_started = {}   # cid -> timestamp when it started farming (for rotation fairness)
 
@@ -643,6 +644,41 @@ async def pool_gold_cycle(rest, cid_list, npc_id=1051, keep=80000, fill_to=15000
         return out
 
 
+async def progression_pass(rest, cid_list, max_s=25):
+    """Briefly connect each char so its connect-path progression runs.
+
+    2026-08-05 discovery: the PERMANENT farmer (BuffBot holds one of the 2
+    farm slots permanently — rotation only swaps the 3rd) NEVER gets a WS
+    connect, so its connect-path logic never runs: _auto_equip_best_weapon
+    (BuffBot farmed with Mithril Stiletto m_atk 36 while Arcane Staff m_atk
+    55 sat in the bag), _auto_train_skills, _auto_craft_talisman,
+    _auto_accept_quests, _auto_claim_completed_quests. The journal showed
+    ONLY ShieldBot (rotated) producing progression lines.
+
+    Connect each char briefly (the connect path fires on first game_state;
+    ~2-5s), then disconnect. Respect the 2-WS cap by doing them serially
+    with a small gap — a connect + immediate disconnect is short enough that
+    it does NOT displace an active farmer (toggle_af already proves this
+    pattern). Returns list of log lines.
+    """
+    out = []
+    for cid in cid_list:
+        st = rest_state(rest, cid)
+        if not st or (st.get('hp') or 0) <= 0:
+            continue  # dead chars get their progression on respawn
+        cfg = CHARACTERS[cid]
+        a = await _agent_for(rest, cid, cfg)
+        if a is None:
+            out.append(f'{cfg["name"]}:progression-connect-failed')
+            continue
+        try:
+            await asyncio.sleep(3)  # let first game_state + progression run
+        finally:
+            await a.disconnect()
+        await asyncio.sleep(2)
+    return out
+
+
 async def main():
     global _last_rotation
     r = RestClient(ACCOUNT_EMAIL, ACCOUNT_PASSWORD)
@@ -678,6 +714,7 @@ async def main():
     # Persistent loop — keep ALL chars alive + farming. Never defer anyone.
     last_rate_log = time.time()
     last_pool = 0.0
+    last_progression = 0.0
     while _running:
         try:
             await asyncio.sleep(CYCLE_S)
@@ -703,6 +740,14 @@ async def main():
                     _fail[cid] = 0
                     _farmer_started.setdefault(cid, time.time())
                 await asyncio.sleep(1)
+            # PROGRESSION PASS (2026-08-05): the permanent farmer (BuffBot)
+            # never gets a WS connect, so its connect-path progression
+            # (auto-equip/train/talisman/quests) never runs. Briefly connect
+            # every char on a timer so ALL chars get the progression wiring.
+            if time.time() - last_progression >= PROGRESSION_S:
+                prog_lines = await progression_pass(r, cid_list)
+                changed.extend(prog_lines)
+                last_progression = time.time()
             # GOLD POOLING (2026-08-05): balance all chars through the shared
             # warehouse every cycle. Runs at supervisor level so even the
             # permanent farmer (BuffBot, never toggled by rotation) gets pooled.
