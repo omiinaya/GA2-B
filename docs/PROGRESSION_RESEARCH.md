@@ -63,3 +63,51 @@ Deep-dive results from client JS (`/tmp/gr2chunks/`) + live API probes.
   Fear, Soul Rupture(58)
 - Level requirements are the key gating factor; core class DPS skills all
   unlock at Lv20.
+
+## 2026-08-05 PM session — progression levers EXECUTED (all verified live)
+
+### BuffBot death spiral — ROOT CAUSE FOUND + FIXED
+- **Two compounding bugs** (not zone difficulty):
+  1. Weapon mismatch: BuffBot (sorcerer, m_atk class) was wielding Mithril
+     Stiletto (m_atk 36) while Arcane Staff (m_atk 55) sat in his bag —
+     19-point m_atk loss on his damage stat. Auto-equip logic was sound but
+     something had overridden the staff.
+  2. Class skills DISABLED: after ascension the server adds class skills to
+     the rotation config with autoEnabled=FALSE. BuffBot had Touch of Flame
+     (power 80) + Magic Mastery disabled — his rotation lacked class DPS.
+- Fix: equipped Arcane Staff (m_atk 55), enabled class skills, added
+  `_auto_enable_class_skills()` to ga_character.py connect path (enables all
+  disabled non-passive skills, PUT full config). Verified: all 3 chars now
+  have 0 disabled non-passive skills. BuffBot went from dying repeatedly
+  (negative gold) to full HP + farming.
+
+### Talismans — CRAFTED 24h buffs, unlock via quest 3 chain
+- talismanSlot1Unlocked=True on all chars after claiming Trial of Ascendancy
+  (quest 3) with the CHAIN advance→complete→claim (multi-stage quests drop
+  stageInfo to None + set awaitingRewardChoice=True — old complete→claim
+  alone 403s).
+- Craft recipes: Tier 1 = 100k + Magical Shard x1 (+3%); Tier 2 = 250k +
+  Dark Crystal x1 + Magical Shard x1 (+6%); Tier 3 = 1M + Stone of Purity
+  (+10%). 24h duration (remaining_seconds=86400), slot talisman_1.
+- Stat mapping: Sorcery=m_atk, Might=p_atk, Life=max_hp, Iron=p_def,
+  Warding=m_def, Wisdom=max_mp, Restoration=regen.
+- Craft works REMOTELY from hunting zones. Verified live: HermesHeal crafted
+  + equipped Talisman of Sorcery Tier 1 (+3% m_atk).
+
+### 🔓 Magic Crystal IS SHOP-BUYABLE — crafting economy UNBLOCKED
+- **The 2026-08-04 buy test returned null ONLY because the char was dead.**
+  Live re-test: POST /api/shop/8/buy {characterId, itemId:6597, qty} →
+  {status: ok}, 1,081 gold each. The ENTIRE Mithril-tier craft ladder is now
+  reachable: Mithril Warhammer 82 / Mithril Greatsword 105 / Crystal-Woven
+  Staff m_atk 80.
+- Archmage's Staff (m_atk 110) + Runic weapons + Tier-3 talismans still need
+  Stone of Purity x5 (drop-only, not in any shop or recipe).
+- Dark Crystal (for Enchanted Crystal via recipe 3) is drop-only too.
+- Reachable caster upgrade: Crystal-Woven Staff (250k + EnchCrystal x2 +
+  Magic Crystal x250 + Dust x6 + Alloy x5) — m_atk 80 vs Arcane 55.
+
+### Token shops (clan-ritual + olympiad) — grind-gated, not farmable here
+- GET /api/clan-ritual/shop?characterId= and /api/olympiad/shop?characterId=
+  both return {tokenBalance: 0, items: [...]}. Items need clan-ritual /
+  olympiad PvP tokens, NOT gold — no path to earn them in the farm loop.
+- Olympiad has Enchant Weapon/Armor Scrolls (would be huge) but token-gated.

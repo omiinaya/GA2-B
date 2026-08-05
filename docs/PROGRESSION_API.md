@@ -106,18 +106,51 @@ is NOT progress.
 ## Banners / talismans / misc
 | Method | Path | Notes |
 |--------|------|-------|
-| GET | `/api/clan-ritual/shop` | banner shop |
-| POST | `/api/clan-ritual/shop/buy` | buy banner |
-| GET | `/api/olympiad/shop` | olympiad shop |
-| POST | `/api/olympiad/shop/buy` | buy olympiad item |
+| GET | `/api/clan-ritual/shop` | banner shop — **tokenBalance-gated** (clan ritual tokens, NOT gold) |
+| POST | `/api/clan-ritual/shop/buy` | buy banner (token-gated) |
+| GET | `/api/olympiad/shop` | olympiad shop — **tokenBalance=0**, has Enchant Scrolls but PvP-token-gated |
+| POST | `/api/olympiad/shop/buy` | buy olympiad item (token-gated) |
 | GET | `/api/auction/*` | auction house (buy/buy-commodity/buyout) |
+| GET | `/api/crafting/recipes` | **talisman recipes** (see below) |
+| POST | `/api/crafting/craft` | `{characterId, recipeId, quantity}` — works REMOTELY from hunting zones |
 
-## Wiring (agent, 2026-08-04)
+## Talismans (2026-08-05 — CRAFTED 24h buffs, verified live)
+- Unlock: claim Trial of Ascendancy (quest 3) via the CHAIN
+  `advance → complete → claim` (multi-stage quests set awaitingRewardChoice
+  =True + state=2, stageInfo drops to None — the old complete→claim alone
+  403s). Reward sets `character.talismanSlot1Unlocked=true`.
+- Craft recipes (from `/api/crafting/recipes`, all work REMOTELY):
+  - Tier 1: 100k gold + Magical Shard x1 → +3% stat
+  - Tier 2: 250k + Dark Crystal x1 + Magical Shard x1 → +6%
+  - Tier 3: 1M + Stone of Purity x1 (+1 Dark Crystal +1 Magical Shard) → +10%
+- 24h duration while equipped (`instanceMetadata.remaining_seconds=86400`).
+- Stat by name: Sorcery=m_atk, Might=p_atk, Life=max_hp, Iron=p_def,
+  Warding=m_def, Wisdom=max_mp, Restoration=regen.
+- Verified recipe ids: Life T1 4746, Might T1 4749, Sorcery T1 4755,
+  Sorcery T2 4756, Sorcery T3 4757. Equip via `/api/inventory/{cid}/equip`.
+
+## Magic Crystal (2026-08-05 — UNBLOCKED, verified live)
+- **Shop-buyable from NPC 8 for 1,081 gold** (itemId 6597). The 2026-08-04
+  buy test returned null ONLY because the char was dead.
+- Unlocks Mithril-tier crafts: Mithril Warhammer (82), Mithril Greatsword
+  (105), Crystal-Woven Staff (m_atk 80).
+- Still drop-only / un-buyable: Stone of Purity (gates Archmage's Staff 110,
+  Runic weapons, Tier-3 talismans), Dark Crystal (for Enchanted Crystal).
+
+## Wiring (agent, 2026-08-04 + 08-05)
 - `_auto_train_skills()` — all affordable `canLearn` skills from trainer NPC 9.
+- `_auto_enable_class_skills()` (2026-08-05) — enables every disabled
+  non-passive class skill in the rotation config (server adds class skills
+  with autoEnabled=FALSE after ascension).
 - `_auto_buy_gear_upgrades()` — armor/accessory upgrades from shop 8, 50% gold
   budget, equips via bag item id.
-- `_claim_completed_quests()` — completes+claims quests whose `stageInfo.current`
-  reached `target`.
+- `_auto_buy_best_weapon()` — best shop weapon by class stat (m_atk/p_atk).
+- `_auto_craft_best_weapon()` (2026-08-05) — best reachable craft (Crystal-
+  Woven Staff / Mithril Greatsword); buys Magic Crystal from shop 8.
+- `_auto_craft_talisman()` (2026-08-05) — 24h class-stat talisman (Sorcery/
+  Might), highest affordable tier, when slot unlocked + none worn.
+- `_claim_completed_quests()` — now runs the full advance→complete→claim
+  chain for multi-stage quests (awaitingRewardChoice/state=2 detection).
 - `ASCEND_PREF` (gr2_data) — role-aware ascendancy class per char.
 - All wired into `_handle_game_state` first-connect path.
 ## Warehouse (2026-08-05 — CORRECTED)
