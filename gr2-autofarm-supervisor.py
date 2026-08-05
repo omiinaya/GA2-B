@@ -331,6 +331,7 @@ async def ensure_char_working(rest, cid, cid_list, target_zone):
     if (st.get('hp') or 0) <= 0:
         # Dead. Free a slot (pause any other farmer briefly), respawn + travel +
         # toggle-AF (ALL need a WS), then restore the paused farmer.
+        was_sheltered = cid in _sheltered
         victim = _free_slot_candidate(rest, cid_list, cid)
         if victim is not None:
             ok, msg = await toggle_af(rest, victim, CHARACTERS[victim], on=False)
@@ -339,6 +340,18 @@ async def ensure_char_working(rest, cid, cid_list, target_zone):
         ok, msg = await respawn_char(rest, cid, cfg)
         out.append(f'{cfg["name"]}:respawn:{msg}')
         await asyncio.sleep(2)
+        if was_sheltered:
+            # A sheltered char died in the safe city (rare — PvP etc). Restore
+            # the shelter: travel back to SAFE_ZONE and stay AF-off. Do NOT
+            # send it to the hunting zone (it's mid-rotation rest).
+            ok, msg = await travel_to_zone(rest, cid, cfg, SAFE_ZONE)
+            out.append(f'{cfg["name"]}:re-shelter:{msg}')
+            await asyncio.sleep(2)
+            if victim is not None and rest_af(rest, victim) is not True:
+                ok, msg = await toggle_af(rest, victim, CHARACTERS[victim], on=True)
+                out.append(f'{CHARACTERS[victim]["name"]}:resume:{msg}')
+                await asyncio.sleep(2)
+            return out
         # after respawn char is in a town — travel to its zone
         ok, msg = await travel_to_zone(rest, cid, cfg, target_zone)
         out.append(f'{cfg["name"]}:travel:{msg}')
