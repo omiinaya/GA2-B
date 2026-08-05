@@ -18,8 +18,17 @@ The WS toggle is a flip command, so we ALWAYS REST-sync the local flag before
 toggling and POLL the server until the desired state is CONFIRMED — a stale
 local flag otherwise causes a direction-inverted toggle (proven in tests).
 
-Supervised by gr2-brain.py (auto-restarts). Usage:
-    python3 gr2-autofarm-supervisor.py
+Safe-zone shelter (2026-08-05): a char rotated out of a farm slot travels to
+SAFE_ZONE (Gludios 149) BEFORE its AF is paused and is marked _sheltered, so
+it rests at full HP instead of standing idle in the hunting zone (the old
+behavior killed HermesHeal repeatedly). Rotation-idle chars are sheltered
+immediately; startup recovers _sheltered from live state.
+
+Runs as a systemd service (systemd/gr2-autofarm-supervisor.service,
+Restart=always). Restart: su-run 'systemctl restart gr2-autofarm-supervisor.service'
+Logs: journalctl -u gr2-autofarm-supervisor + ~/.hermes/gr2-autofarm-supervisor.log
+Gold telemetry: ~/.hermes/grimeage_data.db gold_history (1 row/char/cycle).
+Watchdog: gr2-watchdog.py (15-min cron, silent unless degraded).
 """
 import sys
 sys.stdout.reconfigure(line_buffering=True)
