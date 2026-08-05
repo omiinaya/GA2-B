@@ -765,6 +765,13 @@ class CharacterAgent:
             if (self.gold or 0) > 100000:
                 self._auto_buy_best_weapon()
                 self.fetch_inventory()
+            # 2026-08-05: Magic Crystal is shop-buyable (1,081g each) — the
+            # Mithril-tier craft ladder is now reachable. Craft the best class
+            # weapon (Crystal-Woven Staff / Mithril Greatsword) when gold is
+            # comfortable. Runs before talismans (weapons > 24h buffs).
+            if (self.gold or 0) > 400000:
+                self._auto_craft_best_weapon()
+                self.fetch_inventory()
             # 2026-08-05: talismans are crafted 24h buffs (+3%/+6% class stat).
             # Craft on connect when the slot is unlocked, gold is comfortable,
             # and none is currently worn (daily upkeep, verified live).
@@ -4115,6 +4122,103 @@ class CharacterAgent:
             return 1
         except Exception as e:
             self.analytics.log(f"[{self.name}] auto-buy weapon failed: {e}")
+            return 0
+
+    def _auto_craft_best_weapon(self, budget_floor=400000):
+        """Craft + equip the best reachable weapon for the char's class.
+
+        Discovery (2026-08-05, verified live): Magic Crystal is SHOP-BUYABLE
+        from NPC 8 for 1,081 gold each (the 2026-08-04 buy test returned null
+        only because the char was dead). This unblocks the Mithril-tier craft
+        ladder: Mithril Warhammer (p_atk 82), Mithril Greatsword (105),
+        Crystal-Woven Staff (m_atk 80), Archmage's Staff (110, needs drop-only
+        Stone of Purity x5 — unreachable until drops arrive).
+
+        Strategy: craft the best weapon whose ingredients are obtainable
+        (buy Magic Crystal from shop 8; craft Enchanted Crystal from Dark
+        Crystal via recipe 3 if needed; Magical Dust/Mithril Alloy come from
+        bags/drops). Only when gold exceeds the floor so the farm economy
+        isn't starved. Works REMOTELY from hunting zones (verified craft +
+        buy + equip flow).
+        """
+        try:
+            if (self.gold or 0) < budget_floor:
+                return 0
+            CASTER = {'wizard', 'cleric', 'mage', 'sorcerer', 'bishop',
+                      'necromancer', 'prophet', 'spellsinger', 'elder',
+                      'warcryer', 'spell_howler', 'twilight_elder',
+                      'earth_lord', 'swordsinger', 'plains_walker',
+                      'silver_ranger', 'temple_knight'}
+            is_caster = getattr(self, 'char_class', '') in CASTER
+            # Target weapon by class: casters want Crystal-Woven Staff
+            # (m_atk 80 > Arcane 55); physical want Mithril Greatsword
+            # (p_atk 105 > Warhammer 82).
+            target_name = 'Crystal-Woven Staff' if is_caster else 'Mithril Greatsword'
+            self.fetch_inventory()
+            # Already have it equipped?
+            for it in self.equipped_gear or []:
+                if it.get('itemName') == target_name:
+                    return 0
+            recipes = self.rest.get('/api/crafting/recipes') or []
+            target = next((x for x in recipes
+                           if (x.get('resultItemName') or '') == target_name), None)
+            if not target:
+                return 0
+            # Ingredient check: need bag count for each (buyable ones first).
+            bag_counts = {}
+            for b in self.inventory or []:
+                nm = b.get('itemName')
+                bag_counts[nm] = bag_counts.get(nm, 0) + (b.get('quantity') or 1)
+            need = []
+            for ing in target.get('ingredients') or []:
+                need.append((ing.get('itemName'), ing.get('quantity') or 0,
+                             ing.get('itemId')))
+            # Purchase missing buyable ingredients (Magic Crystal from shop 8).
+            shop_inv = self.fetch_shop_inventory(8) or []
+            shop_prices = {it.get('itemName'): (it.get('buyPrice') or 0, it.get('itemId'))
+                           for it in shop_inv}
+            total_cost = target.get('goldCost') or 0
+            for nm, qty, _ in need:
+                have = bag_counts.get(nm, 0)
+                missing = qty - have
+                if missing <= 0:
+                    continue
+                if nm in shop_prices:
+                    price, item_id = shop_prices[nm]
+                    total_cost += price * missing
+                    if (self.gold or 0) < total_cost:
+                        return 0
+                    res = self.rest.post('/api/shop/8/buy', {
+                        'characterId': self.char_id,
+                        'itemId': item_id,
+                        'quantity': missing})
+                    if not (isinstance(res, dict) and res.get('status') == 'ok'):
+                        self.analytics.log(f"[{self.name}] buy {nm} x{missing}: {res}")
+                        return 0
+                    self.gold = max(0, (self.gold or 0) - price * missing)
+                else:
+                    # Not buyable and not in bag — unreachable right now.
+                    self.analytics.log(f"[{self.name}] craft {target_name}: missing {nm} x{missing} (not buyable)")
+                    return 0
+            if (self.gold or 0) < (target.get('goldCost') or 0):
+                return 0
+            res = self.rest.post('/api/crafting/craft', {
+                'characterId': self.char_id,
+                'recipeId': target.get('id'),
+                'quantity': 1})
+            if not (isinstance(res, dict) and res.get('resultItemName')):
+                self.analytics.log(f"[{self.name}] craft {target_name}: {res}")
+                return 0
+            self.gold = res.get('newGold', self.gold)
+            self.analytics.log(f"[{self.name}] 🔨 Crafted {target_name} ({res.get('newGold')} gold left)")
+            self.fetch_inventory()
+            for bag_it in self.inventory or []:
+                if bag_it.get('itemName') == target_name and not bag_it.get('equipped'):
+                    self.equip_item(bag_it.get('id'))
+                    break
+            return 1
+        except Exception as e:
+            self.analytics.log(f"[{self.name}] auto-craft weapon failed: {e}")
             return 0
 
     def _auto_craft_talisman(self, budget_floor=250000):
