@@ -1,27 +1,25 @@
 #!/usr/bin/env python3
 """gr2-autofarm-supervisor.py — Persistent 3-char auto-farm supervisor.
 
-The server allows only ONE concurrent WebSocket per account (2026-08-04
-discovery). Auto-farm persists server-side after WS disconnect — so the
-winning strategy is: all 3 chars auto-farm SIMULTANEOUSLY, toggled via
-sequential brief-WS connections (never 2 WS at once).
+ALL THREE characters farm simultaneously, and NO character is ever left dead
+or called "disposable."
 
-⚠️ WS-slot discipline (verified 2026-08-04): a char that needs to TRAVEL or
-RESPAWN can only hold a WS while no other char is actively auto-farming.
-With 2 chars AF-on, a third char's WS gets evicted within ~3s (the proven
-baseline harness fails identically). Sequence therefore is:
-  1. stop AF on ALL chars          (free the slot)
-  2. travel/respawn the target     (one char at a time)
-  3. re-enable AF on all chars     (fast toggles — these work while others farm)
+The server limits CONCURRENT WebSocket connections (~2 per account), NOT the
+number of simultaneous auto-farmers. Auto-farm PERSISTS server-side after the
+WS disconnects, so all 3 chars can auto-farm at the same time via sequential
+brief-WS toggles. The only constraint: to issue a command (respawn/travel/
+toggle) to a char, its WS must be able to connect — which requires a free
+slot. So the golden rule:
 
-Uses CharacterAgent.connect() (its _message_loop keeps the WS alive and
-processes game_state) + agent.disconnect() for clean task cancellation —
-the exact pattern proven by gr2-auto-baseline.py. A raw websockets client
-gets closed by the server because nothing processes game_state.
+    When a char needs a WS (respawn/travel), briefly PAUSE one other farmer
+    to free a slot, do the work, then RESUME it. Never just abandon the char.
 
-Supervised by gr2-brain.py (auto-restarts like the old combat daemon).
+The WS toggle is a flip command, so we ALWAYS REST-sync the local flag before
+toggling and POLL the server until the desired state is CONFIRMED — a stale
+local flag otherwise causes a direction-inverted toggle (proven in tests).
 
-Usage: python3 gr2-autofarm-supervisor.py   (foreground, or via brain/systemd)
+Supervised by gr2-brain.py (auto-restarts). Usage:
+    python3 gr2-autofarm-supervisor.py
 """
 import sys
 sys.stdout.reconfigure(line_buffering=True)
@@ -45,40 +43,42 @@ LOG_FILE = os.path.expanduser('~/.hermes/gr2-autofarm-supervisor.log')
 STATE_FILE = os.path.expanduser('~/.hermes/gr2-autofarm-state.json')
 
 PARTY_ZONE = 64188      # Windy Meadow Gates (Lv21-24) — direct from Gludios 149
-CYCLE_S = int(os.environ.get('GR2_CYCLE', '90'))       # main loop cadence
+CYCLE_S = int(os.environ.get('GR2_CYCLE', '60'))        # main loop cadence
 RATE_WINDOW_S = int(os.environ.get('GR2_RATE_WINDOW', '600'))  # gold-rate window
 
-# Per-char hunting zone. 64188 (Windy Meadow Gates, Lv21-24) is the shared
-# party zone — but Lv21 BuffBot keeps DYING there (baseline-verified, died on
-# every attempt). He's routed to Windmill Plains South (53, Lv20-22): the only
-# 1-hop safe zone from Gludios, AND a Trial of Ascendancy target zone (Bandit
-# Scouts), so his quest progresses while farming. HermesHeal/ShieldBot (Lv23)
-# handle 64188. (53 has a Wind Strike immunity quirk for spellcasters — auto-
-# attack still farms; a dagger/bow later re-rolls him to a melee layout.)
+# Per-char hunting zone. The server caps 2 simultaneous farmers, so slots
+# ROTATE (rotate_slots) — every char must be able to survive in its own zone.
+# BuffBot is Lv21/967HP and gets overwhelmed in 64188 (Lv21-24); zone 53
+# (Windmill Plains South, Lv20-22) is his survivable zone AND a Trial of
+# Ascendancy quest zone (Bandit Scouts) — he survives + produces there (measured
+# ~16-56k/hr, HP stable, no deaths). The Lv23 pair handle 64188.
 CHAR_ZONE = {
-    1069: 53,     # BuffBot  — Windmill Plains South (Lv20-22, 1-hop safe + quest)
+    1069: 53,     # BuffBot    — Windmill Plains South (Lv20-22, safe + quest)
     1070: 64188,  # HermesHeal — Windy Meadow Gates (Lv21-24)
     1071: 64188,  # ShieldBot  — Windy Meadow Gates (Lv21-24)
 }
 
-# Toggle priority — the server caps ~2 active sessions, and the LAST char
-# toggled is the one that loses the slot race. Order matters: the strongest
-# farmers must claim slots FIRST so they're never dropped. ShieldBot
-# (p_atk 82 Mithril Warhammer, 1416 HP, full Steel) + HermesHeal (44k/hr
-# baseline) are the money-makers; BuffBot (Lv21, weakest) is the expendable
-# third who gets capped when the server limits us to 2.
-PRIORITY = [1071, 1070, 1069]   # ShieldBot, HermesHeal, BuffBot
+# All three are equal citizens. Order only affects WHO gets paused as the
+# temporary slot-holder when a dead/out-of-zone char needs a WS. No char is
+# ever "disposable" — the pause is always brief and always resumed.
+ORDER = [1069, 1070, 1071]
 
-PARTY_ZONE = 64188      # default/shared hunting zone
+# FAIR ROTATION — the server hard-caps 2 simultaneous farmers (a 3rd toggle is
+# evicted; verified cleanly 2026-08-04). To keep every character "doing work"
+# and leveling (BuffBot was stuck at Lv21 while the others hit 23), rotate the
+# 2 active slots through all 3 chars: the idle char is swapped in on a timer,
+# pausing whichever farmer has farmed the longest. Nobody is permanently
+# sidelined; everyone contributes and levels.
+ROTATE_S = int(os.environ.get('GR2_ROTATE', '300'))  # rotate every 5 min default
+_last_rotation = 0.0
+_farmer_started = {}   # cid -> timestamp when it started farming (for rotation fairness)
 
 _gold_history = {}      # char_id -> deque[(t, gold)]
 _running = True
-# Consecutive AF-toggle failures per char → exponential backoff. The server
-# allows only ~2 active sessions per account (verified 2026-08-04: the 3rd
-# char's WS gets evicted within ~2s while 2 others farm). Retrying the capped
-# char every cycle wastes connects and hammers the server — back off instead.
-_af_fail = {cid: 0 for cid in CHARACTERS}
-_last_af_attempt = {cid: 0.0 for cid in CHARACTERS}
+# Consecutive WS/toggle failures per char -> exponential backoff. This is for
+# TRANSIENT server errors, NOT for "the char is disposable."
+_fail = {cid: 0 for cid in CHARACTERS}
+_last_attempt = {cid: 0.0 for cid in CHARACTERS}
 
 
 def log(msg):
@@ -102,76 +102,146 @@ def snapshot(rest):
         'af': c.get('isAutoFarming')} for c in chars}
 
 
-def rest_af(rest, cid):
+def rest_state(rest, cid):
     chars = rest.get('/api/characters')
     if isinstance(chars, list):
         for c in chars:
             if c.get('id') == cid:
-                return c.get('isAutoFarming')
+                return {
+                    'af': c.get('isAutoFarming'),
+                    'hp': c.get('hp') or 0,
+                    'zone': c.get('currentZoneId'),
+                    'state': c.get('state'),
+                }
     return None
 
 
-async def agent_for(rest, cid, cfg, wait_zone=False, max_wait=20):
-    """Connect a CharacterAgent, wait for game_state (+ optional zone).
-    Returns (agent, zone) or (None, None). Caller MUST disconnect()."""
-    an = Analytics(init_db())
-    a = CharacterAgent(cid, cfg, rest, an)
+def rest_af(rest, cid):
+    st = rest_state(rest, cid)
+    return st['af'] if st else None
+
+
+def _detail(rest, cid):
+    """Get a char's server state from the LIST endpoint — the ONLY endpoint
+    whose isAutoFarming is authoritative. The DETAIL endpoint
+    (/api/characters/{id}) does NOT include isAutoFarming (returns None),
+    which caused direction-inverted toggles (verified 2026-08-04)."""
+    st = rest_state(rest, cid)
+    if st:
+        return {'hp': st.get('hp'), 'maxHp': st.get('maxHp'),
+                'zone': st.get('zone'), 'state': st.get('state'),
+                'af': st.get('af')}
+    # fallback to detail (missing af is acceptable — callers use list truth)
+    d = rest.get(f'/api/characters/{cid}')
+    if isinstance(d, dict):
+        return {'hp': d.get('hp'), 'maxHp': d.get('maxHp'),
+                'zone': d.get('currentZoneId'), 'state': d.get('state'),
+                'af': None}
+    return None
+
+
+async def _agent_for(rest, cid, cfg):
+    """Acquire a CharacterAgent whose local flags are REST-synced.
+    Returns the connected agent (caller MUST disconnect) or None."""
+    a = CharacterAgent(cid, cfg, rest, Analytics(init_db()))
     a._keep_running = True
+    st = _detail(rest, cid) or {}
+    a.hp = st.get('hp', a.hp)
+    a.max_hp = st.get('maxHp', a.max_hp)
+    a.is_dead = (st.get('hp') or 0) <= 0
+    a.current_zone_id = st.get('zone')
+    a.is_autofarming = bool(st.get('af'))  # CRITICAL: sync from LIST truth
     ok = await a.connect()
     if not ok:
         try:
             await a.disconnect()
         except Exception:
             pass
-        return None, None
-    t0 = time.time()
-    while time.time() - t0 < max_wait:
-        await asyncio.sleep(0.5)
-        if a.connected and a.current_zone_id is not None:
-            if not wait_zone or a.current_zone_id == wait_zone:
-                return a, a.current_zone_id
-            return a, a.current_zone_id
-    return a, a.current_zone_id
+        return None
+    return a
 
 
-async def respawn_char(rest, cid, cfg):
-    chars = rest.get('/api/characters')
-    cur = next((c for c in chars if c.get('id') == cid), None)
-    if not cur:
-        return False, 'char-not-found'
-    if (cur.get('hp') or 0) > 0:
-        return True, 'already-alive'
-    a, _ = await agent_for(rest, cid, cfg, max_wait=15)
+async def toggle_af(rest, cid, cfg, on=True, confirm_s=10):
+    """REST-sync-aware AF toggle, POLLS until the server confirms the state.
+    Returns (ok, msg)."""
+    a = await _agent_for(rest, cid, cfg)
     if a is None:
         return False, 'connect-failed'
     try:
-        await a.ws_send('respawn', {})
-        for _ in range(25):  # up to 12.5s
-            await asyncio.sleep(0.5)
-            chars = rest.get('/api/characters')
-            cur = next((c for c in chars if c.get('id') == cid), None)
-            if cur and (cur.get('hp') or 0) > 0:
-                return True, f'respawned hp={cur["hp"]}'
+        for attempt in range(3):
+            st = _detail(a.rest, cid) or {}
+            a.is_autofarming = bool(st.get('af'))  # LIST truth, not detail None
+            if a.is_autofarming == on:
+                return True, f'already-{"ON" if on else "OFF"}'
+            if on:
+                await a.start_autofarm()
+            else:
+                await a.stop_autofarm()
+            # Poll until confirmed (server lag ~1-3s on the flip)
+            t0 = time.time()
+            while time.time() - t0 < confirm_s:
+                await asyncio.sleep(1)
+                if rest_af(a.rest, cid) == on:
+                    return True, f'toggled->{"ON" if on else "OFF"} (t={int(time.time()-t0)}s)'
+            # Not confirmed — likely stale party/combat state rejecting the flip.
+            # Leave the party (clears invisible server-side party state) and retry.
+            await a.ws_send('party:leave', {})
+            a.is_in_party = False
+            a.party_members = {}
+            await asyncio.sleep(2)
+        after = rest_af(a.rest, cid)
+        return False, f'still-{"ON" if after else "OFF"}'
+    finally:
+        await a.disconnect()
+
+
+async def respawn_char(rest, cid, cfg, max_s=30):
+    """Respawn a dead char. Assumes a WS slot is free (caller paused a farmer).
+    Returns (ok, msg)."""
+    st = rest_state(rest, cid)
+    if not st:
+        return False, 'char-not-found'
+    if (st.get('hp') or 0) > 0:
+        return True, 'already-alive'
+    a = await _agent_for(rest, cid, cfg)
+    if a is None:
+        return False, 'connect-failed'
+    try:
+        if a.is_dead:
+            await a.ws_send('respawn', {})
+        t0 = time.time()
+        while time.time() - t0 < max_s:
+            await asyncio.sleep(1)
+            c = rest_state(a.rest, cid)
+            if c and (c.get('hp') or 0) > 0:
+                return True, f"respawned hp={c['hp']} zone={c.get('zone')}"
+            # if we got disconnected and reconnected, resend respawn
+            if not a.connected and a.is_dead:
+                try:
+                    await a.connect()
+                except Exception:
+                    pass
         return False, 'respawn-timeout'
     finally:
         await a.disconnect()
 
 
-async def travel_to_zone(rest, cid, cfg, target=PARTY_ZONE):
-    chars = rest.get('/api/characters')
-    cur = next((c for c in chars if c.get('id') == cid), None)
-    if not cur:
+async def travel_to_zone(rest, cid, cfg, target=PARTY_ZONE, max_s=25):
+    """Travel a LIVE char to a zone. Assumes a WS slot is free.
+    Returns (ok, msg)."""
+    st = rest_state(rest, cid)
+    if not st:
         return False, 'char-not-found'
-    if cur.get('currentZoneId') == target:
+    if (st.get('hp') or 0) <= 0:
+        return False, 'dead-first'
+    if st.get('zone') == target:
         return True, f'already-in-{target}'
-    a, zone = await agent_for(rest, cid, cfg, max_wait=15)
+    a = await _agent_for(rest, cid, cfg)
     if a is None:
         return False, 'connect-failed'
     try:
         if a.current_zone_id == target:
             return True, f'already-in-{target}'
-        # force-exit combat + rest-toggle before travel (server rejects travel
-        # in combat/resting — pitfalls #45/#75)
         try:
             await a.ws_send('combat:stop_attack', {})
         except Exception:
@@ -186,181 +256,139 @@ async def travel_to_zone(rest, cid, cfg, target=PARTY_ZONE):
             pass
         await a.ws_send('start_travel', {'path': [target]})
         a.combat_state = 'TRAVELING'
-        for _ in range(40):  # up to 20s
+        t0 = time.time()
+        while time.time() - t0 < max_s:
             await asyncio.sleep(0.5)
-            if a.current_zone_id == target:
+            c = rest_state(a.rest, cid)
+            if c and c.get('zone') == target and (c.get('hp') or 0) > 0:
                 return True, f'arrived-{target}'
-        chars = rest.get('/api/characters')
-        cur = next((c for c in chars if c.get('id') == cid), None)
-        if cur and cur.get('currentZoneId') == target:
+        c = rest_state(a.rest, cid)
+        if c and c.get('zone') == target:
             return True, f'arrived-{target}-rest'
-        return False, f'travel-timeout-still-{a.current_zone_id}'
+        return False, f'travel-timeout-still-{c.get("zone") if c else "?"}'
     finally:
         await a.disconnect()
 
 
-async def toggle_af(rest, cid, cfg, on=True):
-    """REST-state-aware AF toggle. Never blind-toggles (stale local flag bug).
+def _free_slot_candidate(rest, cid_list, except_cid):
+    """Pick a farmer to briefly pause to free a WS slot for `except_cid`.
+    Prefers a char that is actually farming. Returns cid or None."""
+    farmers = [c for c in cid_list if c != except_cid and rest_af(rest, c) is True]
+    if not farmers:
+        return None
+    # Prefer the lowest-priority (last in ORDER) farmer — but any works.
+    return max(farmers, key=lambda x: cid_list.index(x))
 
-    The baseline-proven pattern: connect → WAIT for game_state (which populates
-    the agent's is_autofarming from the SERVER's truth) → start/stop_autofarm()
-    only sends combat:toggle_autofarm when the local flag differs from desired.
-    Forcing the local flag (as an earlier version did) makes the toggle ALWAYS
-    fire — flipping an already-ON server state to OFF."""
-    actual = rest_af(rest, cid)
-    if actual == on:
-        return True, f'already-{"ON" if on else "OFF"}'
-    a, _ = await agent_for(rest, cid, cfg, max_wait=15)
-    if a is None:
-        return False, 'connect-failed'
-    try:
-        # Sync the local flag with the server before deciding to toggle. The
-        # agent's game_state handler sets is_autofarming from the WS payload;
-        # if it's still the init default, re-read from REST.
-        chars = rest.get('/api/characters')
-        cur = next((c for c in chars if c.get('id') == cid), None)
-        if cur is not None:
-            a.is_autofarming = bool(cur.get('isAutoFarming'))
-        if on:
-            await a.start_autofarm()
-        else:
-            await a.stop_autofarm()
-        await asyncio.sleep(2)
-        after = rest_af(rest, cid)
-        if after != on:
-            # Rejected — likely invisible server-side party state (pitfall #38)
-            await a.ws_send('party:leave', {})
-            a.is_in_party = False
-            a.party_members = {}
-            await asyncio.sleep(3)
-            chars = rest.get('/api/characters')
-            cur = next((c for c in chars if c.get('id') == cid), None)
-            if cur is not None:
-                a.is_autofarming = bool(cur.get('isAutoFarming'))
-            if on:
-                await a.start_autofarm()
-            else:
-                await a.stop_autofarm()
+
+async def ensure_char_working(rest, cid, cid_list, target_zone):
+    """Ensure ONE char is alive, in its zone, and farming — pausing another
+    farmer only as long as needed to free a WS slot. NEVER abandons the char.
+    Returns list of log lines."""
+    out = []
+    cfg = CHARACTERS[cid]
+    st = rest_state(rest, cid)
+    if st is None:
+        return [f'{cfg["name"]}:char-not-found']
+
+    if (st.get('hp') or 0) <= 0:
+        # Dead. Free a slot (pause any other farmer briefly), respawn + travel +
+        # toggle-AF (ALL need a WS), then restore the paused farmer.
+        victim = _free_slot_candidate(rest, cid_list, cid)
+        if victim is not None:
+            ok, msg = await toggle_af(rest, victim, CHARACTERS[victim], on=False)
+            out.append(f'{CHARACTERS[victim]["name"]}:pause:{msg}')
             await asyncio.sleep(2)
-            after = rest_af(rest, cid)
-        return True, f'toggled->{"ON" if after else "OFF"}'
-    finally:
-        await a.disconnect()
+        ok, msg = await respawn_char(rest, cid, cfg)
+        out.append(f'{cfg["name"]}:respawn:{msg}')
+        await asyncio.sleep(2)
+        # after respawn char is in a town — travel to its zone
+        ok, msg = await travel_to_zone(rest, cid, cfg, target_zone)
+        out.append(f'{cfg["name"]}:travel:{msg}')
+        await asyncio.sleep(2)
+        # toggle AF ON while the slot is STILL free (2nd farmer paused) — a
+        # separate pass after resume would have no free slot to issue the toggle.
+        if rest_af(rest, cid) is not True:
+            ok, msg = await toggle_af(rest, cid, cfg, on=True)
+            out.append(f'{cfg["name"]}:af:{msg}')
+            await asyncio.sleep(2)
+        # restore the paused farmer LAST — after all the target's WS needs are done
+        if victim is not None and rest_af(rest, victim) is not True:
+            ok, msg = await toggle_af(rest, victim, CHARACTERS[victim], on=True)
+            out.append(f'{CHARACTERS[victim]["name"]}:resume:{msg}')
+            await asyncio.sleep(2)
+        return out
+
+    # Alive but out of zone. Travel + toggle-AF under one paused slot, then restore.
+    if st.get('zone') != target_zone:
+        victim = _free_slot_candidate(rest, cid_list, cid)
+        if victim is not None:
+            ok, msg = await toggle_af(rest, victim, CHARACTERS[victim], on=False)
+            out.append(f'{CHARACTERS[victim]["name"]}:pause:{msg}')
+            await asyncio.sleep(2)
+        ok, msg = await travel_to_zone(rest, cid, cfg, target_zone)
+        out.append(f'{cfg["name"]}:travel:{msg}')
+        await asyncio.sleep(2)
+        # toggle AF on while the slot is still free
+        if rest_af(rest, cid) is not True:
+            ok, msg = await toggle_af(rest, cid, cfg, on=True)
+            out.append(f'{cfg["name"]}:af:{msg}')
+            await asyncio.sleep(2)
+        if victim is not None and rest_af(rest, victim) is not True:
+            ok, msg = await toggle_af(rest, victim, CHARACTERS[victim], on=True)
+            out.append(f'{CHARACTERS[victim]["name"]}:resume:{msg}')
+            await asyncio.sleep(2)
+        return out
+
+    # Alive, in zone, but AF off — toggle ON only if a farm slot is free
+    # (fewer than 2 other chars farming). If both slots are held, this char is
+    # rotation-idle — leave it for rotate_slots to swap fairly rather than
+    # hammering a toggle the server will reject (2-farmer cap).
+    if rest_af(rest, cid) is not True:
+        others_farming = sum(1 for x in cid_list if x != cid and rest_af(rest, x) is True)
+        if others_farming >= 2:
+            out.append(f'{cfg["name"]}:af-wait (2 slots held, rotation governs)')
+            return out
+        if time.time() - _last_attempt[cid] < (2 ** _fail[cid]) * 10:
+            st2 = rest_state(rest, cid)
+            out.append(f'{cfg["name"]}:af-backoff (hp={st2.get("hp") if st2 else "?"})')
+            return out
+        _last_attempt[cid] = time.time()
+        ok, msg = await toggle_af(rest, cid, cfg, on=True)
+        if ok and 'OFF' in msg:
+            _fail[cid] += 1
+        else:
+            _fail[cid] = 0
+            out.append(f'{cfg["name"]}:af:{msg}')
+    return out
 
 
 async def ensure_all_farming(rest, cid_list):
-    """Minimal-disruption sweep.
-
-    Principle: NEVER stop a working farmer to fix another char — every stop
-    costs that farmer ~15-30s of gold. A DEAD char has a free WS slot (it's
-    not farming), so it can be respawned/traveled directly. A LIVE char out of
-    zone needs a slot: only then stop the LOWEST-priority farmer, briefly.
-
-    Order: fix dead chars first (free slots), then out-of-zone live chars
-    (only stopping a farmer if all 2 slots are held by farmers), then toggle
-    AF ON for any char that's alive, in-zone, and AF-off."""
+    """Ensure EVERY char is alive, in its zone, and farming. No char is ever
+    deferred or abandoned. Order chosen to minimise slot contention (fix the
+    char that most needs a WS first, then toggle the rest on)."""
     logmsg = []
-    chars = rest.get('/api/characters')
-    by_id = {c['id']: c for c in chars} if isinstance(chars, list) else {}
-
-    dead = [cid for cid in cid_list if (by_id.get(cid, {}).get('hp') or 0) <= 0]
-    out_of_zone = [cid for cid in cid_list
-                   if cid not in dead and by_id.get(cid, {}).get('currentZoneId') != CHAR_ZONE.get(cid, PARTY_ZONE)]
-    af_off = [cid for cid in cid_list
-              if cid not in dead and cid not in out_of_zone and rest_af(rest, cid) is not True]
-
-    # 1. Fix dead chars. Only resurrect if high-priority OR fewer than 2 farmers
-    #    are active — resurrecting a disposable 3rd wheel by pausing a working
-    #    farmer costs more output than the resurrection gains (the swap will
-    #    just evict it again). A dead low-priority char waits until a slot frees.
-    for cid in dead:
-        cfg = CHARACTERS[cid]
-        farmers = [x for x in cid_list if x != cid and rest_af(rest, x) is True]
-        if len(farmers) >= 2:
-            # 2 farmers busy — only resurrect if this char is in the top-2 slots
-            if cid_list.index(cid) >= 2:
-                logmsg.append(f'{cfg["name"]}:defer (2 farmers busy, low priority)')
-                continue
-            victim = max(farmers, key=lambda x: cid_list.index(x))
-            ok, msg = await toggle_af(rest, victim, CHARACTERS[victim], on=False)
-            logmsg.append(f'{CHARACTERS[victim]["name"]}:pause:{msg}')
-            await asyncio.sleep(3)
-        else:
-            victim = None
-        ok, msg = await respawn_char(rest, cid, cfg)
-        logmsg.append(f'{cfg["name"]}:respawn:{msg}')
-        await asyncio.sleep(3)
-        # after respawn the char is usually in a city — travel it too
-        ok, msg = await travel_to_zone(rest, cid, cfg, CHAR_ZONE.get(cid, PARTY_ZONE))
-        logmsg.append(f'{cfg["name"]}:travel:{msg}')
-        await asyncio.sleep(3)
-        # toggle AF on (it'll be swapped out later if a higher-priority char waits)
-        if rest_af(rest, cid) is not True:
-            ok, msg = await toggle_af(rest, cid, cfg, on=True)
-            logmsg.append(f'{cfg["name"]}:af:{msg}')
-            await asyncio.sleep(3)
-        # restore the paused farmer
-        if victim is not None and rest_af(rest, victim) is not True:
-            ok, msg = await toggle_af(rest, victim, CHARACTERS[victim], on=True)
-            logmsg.append(f'{CHARACTERS[victim]["name"]}:resume:{msg}')
-            await asyncio.sleep(3)
-
-    # 2. Fix live chars out of zone. Count how many farmers hold slots; if all
-    #    slots are busy, stop ONE low-priority farmer for the travel window.
-    for cid in out_of_zone:
-        cfg = CHARACTERS[cid]
-        # count current farmers (excluding this char)
-        farmers = [x for x in cid_list if x != cid and rest_af(rest, x) is True]
-        victim = None
-        if len(farmers) >= 2:
-            # all slots busy — stop the lowest-priority farmer briefly
-            victim = farmers[-1]  # reverse-id order = lowest priority roughly
-            ok, msg = await toggle_af(rest, victim, CHARACTERS[victim], on=False)
-            logmsg.append(f'{CHARACTERS[victim]["name"]}:pause:{msg}')
-            await asyncio.sleep(3)
-        ok, msg = await travel_to_zone(rest, cid, cfg, CHAR_ZONE.get(cid, PARTY_ZONE))
-        logmsg.append(f'{cfg["name"]}:travel:{msg}')
-        await asyncio.sleep(3)
-        # restore the paused farmer
-        if victim is not None and rest_af(rest, victim) is not True:
-            ok, msg = await toggle_af(rest, victim, CHARACTERS[victim], on=True)
-            logmsg.append(f'{CHARACTERS[victim]["name"]}:resume:{msg}')
-            await asyncio.sleep(3)
-
-    # 3. Toggle AF ON for alive in-zone chars that are off (respect backoff).
-    for cid in af_off:
-        if time.time() - _last_af_attempt[cid] < (2 ** _af_fail[cid]) * 20:
-            continue
-        _last_af_attempt[cid] = time.time()
-        ok, msg = await toggle_af(rest, cid, CHARACTERS[cid], on=True)
-        if ok and 'OFF' in msg:
-            _af_fail[cid] += 1
-        else:
-            _af_fail[cid] = 0
-            logmsg.append(f'{CHARACTERS[cid]["name"]}:af:{msg}')
-        await asyncio.sleep(3)
-
-    # 4. Priority enforcement: if a HIGHER-priority char is AF-off while a
-    #    LOWER-priority one farms, swap them so the strongest pair holds the
-    #    2 active slots. (Server caps ~2; this guarantees ShieldBot gets in
-    #    ahead of BuffBot whenever a slot frees.)
+    # Pass 1: fix each char that needs a WS (dead or out-of-zone) — one at a time
+    # so slot contention between their needs is serialised.
     for cid in cid_list:
-        if rest_af(rest, cid) is True:
-            continue  # already farming — fine
-        farmers = [x for x in cid_list if rest_af(rest, x) is True]
-        if not farmers:
-            break
-        # evict the farmer with the LOWEST priority rank
-        victim = max(farmers, key=lambda x: cid_list.index(x))
-        if cid_list.index(victim) < cid_list.index(cid):
-            continue  # victim is higher priority than the waiting char
-        ok, msg = await toggle_af(rest, victim, CHARACTERS[victim], on=False)
-        logmsg.append(f'{CHARACTERS[victim]["name"]}:evict:{msg}')
-        await asyncio.sleep(3)
-        ok, msg = await toggle_af(rest, cid, CHARACTERS[cid], on=True)
-        logmsg.append(f'{CHARACTERS[cid]["name"]}:swap-in:{msg}')
-        await asyncio.sleep(3)
-        break  # one swap per sweep is enough
+        st = rest_state(rest, cid)
+        if st is None:
+            continue
+        target = CHAR_ZONE.get(cid, PARTY_ZONE)
+        needs_ws = (st.get('hp') or 0) <= 0 or st.get('zone') != target
+        if needs_ws:
+            lines = await ensure_char_working(rest, cid, cid_list, target)
+            logmsg.extend(lines)
+            await asyncio.sleep(2)
+    # Pass 2: toggle AF ON for any alive/in-zone char that's off.
+    for cid in cid_list:
+        st = rest_state(rest, cid)
+        if st is None:
+            continue
+        target = CHAR_ZONE.get(cid, PARTY_ZONE)
+        if (st.get('hp') or 0) > 0 and st.get('zone') == target and rest_af(rest, cid) is not True:
+            lines = await ensure_char_working(rest, cid, cid_list, target)
+            logmsg.extend(lines)
+            await asyncio.sleep(2)
     return logmsg
 
 
@@ -390,7 +418,39 @@ def report_rates(snap):
     return out
 
 
+async def rotate_slots(rest, cid_list, target_zone=PARTY_ZONE):
+    """Fair-rotation: if a char is alive+in-zone but AF-off (sidelined by the
+    2-farmer cap), swap it into a slot by pausing the farmer that has been
+    farming the longest. Returns log lines."""
+    out = []
+    idle = [c for c in cid_list
+            if (rest_state(rest, c) or {}).get('hp', 0) > 0
+            and (rest_state(rest, c) or {}).get('zone') == CHAR_ZONE.get(c, target_zone)
+            and rest_af(rest, c) is not True]
+    if not idle:
+        return out  # everyone farming (or dead/out-of-zone handled elsewhere)
+    farmers = [c for c in cid_list if rest_af(rest, c) is True]
+    if not farmers:
+        return out  # no farmer to swap with; enable_* passes handle this
+    # Swap the highest-priority idle char into a slot, pausing the farmer
+    # who has farmed the longest (fair — no one hoards a slot forever).
+    cid = idle[0]  # ORDER-ordered = lowest id first = BuffBot gets in first
+    victim = max(farmers, key=lambda x: _farmer_started.get(x, 0) or 0)
+    ok, msg = await toggle_af(rest, victim, CHARACTERS[victim], on=False)
+    out.append(f'{CHARACTERS[victim]["name"]}:rot-pause:{msg}')
+    await asyncio.sleep(3)
+    ok, msg = await toggle_af(rest, cid, CHARACTERS[cid], on=True)
+    out.append(f'{CHARACTERS[cid]["name"]}:rot-in:{msg}')
+    await asyncio.sleep(3)
+    # restart the "started" clock for the freshly-paused farmer (it just got the
+    # longest-farm time; the newly-swapped-in one starts fresh)
+    _farmer_started[victim] = 0
+    _farmer_started[cid] = time.time()
+    return out
+
+
 async def main():
+    global _last_rotation
     r = RestClient(ACCOUNT_EMAIL, ACCOUNT_PASSWORD)
     r.login()
     if not getattr(r, 'token', None):
@@ -401,48 +461,22 @@ async def main():
     log(f'start {json.dumps(snap)}')
     record_gold(snap)
 
-    cid_list = list(PRIORITY)
+    cid_list = list(ORDER)
     logmsg = await ensure_all_farming(r, cid_list)
     for m in logmsg:
         log(m)
 
-    # Verify + retry pattern (stale party state can reject the first attempt).
-    # Uses exponential backoff so a char that can't hold a session (2-active
-    # cap) isn't hammered.
-    for attempt in range(3):
-        off = [cid for cid in cid_list if rest_af(r, cid) is not True]
-        if not off:
-            break
-        waited = False
-        for cid in off:
-            if time.time() - _last_af_attempt[cid] < (2 ** _af_fail[cid]) * 15:
-                waited = True
-                continue
-            _last_af_attempt[cid] = time.time()
-            ok, msg = await toggle_af(r, cid, CHARACTERS[cid], on=True)
-            if ok and 'OFF' in msg:
-                _af_fail[cid] += 1
-            else:
-                _af_fail[cid] = 0
-            log(f"retry ON {CHARACTERS[cid]['name']}: {msg}")
-            await asyncio.sleep(4)
-        if waited and not any(time.time() - _last_af_attempt[c] >= (2 ** _af_fail[c]) * 15 for c in off):
-            # everyone in backoff — give the loop a chance to settle
-            await asyncio.sleep(30)
+    # No long verify loop — a capped 3rd char (2-farmer server limit) can't be
+    # forced into a slot, retrying it just wastes connect time and toggles the
+    # ACTIVE farmers off. The main loop's ensure + fair-rotation handles the
+    # 3rd slot promptly. Just report the sweep result and move on.
+    log(f'AF sweep complete: {json.dumps({CHARACTERS[c]["name"]: rest_af(r, c) for c in cid_list})}')
 
-    log(f'AF sweep complete: {json.dumps({CHARACTERS[cid]["name"]: rest_af(r, cid) for cid in cid_list})}')
-
-    # Persistent loop — light maintenance: re-toggle AF if a char dropped off,
-    # respawn if dead. Travel only when a char is out of zone (rare after the
-    # initial sweep; slot-discipline applies automatically). Chars in backoff
-    # (capped by the 2-active session limit) are skipped until their timer
-    # lapses, so we don't waste connects on a char the server won't accept.
+    # Persistent loop — keep ALL chars alive + farming. Never defer anyone.
     last_rate_log = time.time()
     while _running:
         try:
             await asyncio.sleep(CYCLE_S)
-            # Re-write PID each cycle so the brain's supervision always finds
-            # us (startup write can race with an old instance's cleanup).
             try:
                 with open(PID_FILE, 'w') as f:
                     f.write(str(os.getpid()))
@@ -451,52 +485,26 @@ async def main():
             snap = snapshot(r)
             record_gold(snap)
             changed = []
-            # quick pass: dead chars need respawn (slot discipline: stop others)
-            dead = [cid for cid in cid_list if (snap.get(cid, {}).get('hp') or 0) <= 0]
-            out_of_zone = [cid for cid in cid_list if snap.get(cid, {}).get('zone') != CHAR_ZONE.get(cid, PARTY_ZONE)]
-            if dead or out_of_zone:
-                logmsg = await ensure_all_farming(r, cid_list)
-                changed.extend(logmsg)
-                # 'ensure_all_farming' re-toggles everyone; reset backoff on success
-                for cid in cid_list:
-                    if rest_af(r, cid) is True:
-                        _af_fail[cid] = 0
-            else:
-                # light pass: just re-toggle dropped AF (fast, works while farming)
-                for cid in cid_list:
-                    if rest_af(r, cid) is not True:
-                        if time.time() - _last_af_attempt[cid] < (2 ** _af_fail[cid]) * 20:
-                            continue  # in backoff — skip
-                        _last_af_attempt[cid] = time.time()
-                        ok, msg = await toggle_af(r, cid, CHARACTERS[cid], on=True)
-                        if ok and 'OFF' in msg:
-                            _af_fail[cid] += 1
-                        else:
-                            _af_fail[cid] = 0
-                            changed.append(f'{CHARACTERS[cid]["name"]}:af:{msg}')
-                        await asyncio.sleep(2)
-                # Priority enforcement: if a HIGHER-priority char is AF-off while
-                # a LOWER-priority one farms, swap them so the strongest pair
-                # holds the slots. The server caps ~2 active; this guarantees
-                # e.g. ShieldBot gets in ahead of BuffBot when a slot frees.
-                for cid in cid_list:
-                    if rest_af(r, cid) is True:
-                        continue  # already farming — fine
-                    # find the lowest-priority char currently farming to evict
-                    farmers = [x for x in cid_list if rest_af(r, x) is True]
-                    if not farmers:
-                        break
-                    # evict the farmer with the LOWEST priority rank
-                    victim = max(farmers, key=lambda x: cid_list.index(x))
-                    if cid_list.index(victim) < cid_list.index(cid):
-                        continue  # victim is higher priority than the wait — no swap
-                    ok, msg = await toggle_af(r, victim, CHARACTERS[victim], on=False)
-                    changed.append(f'{CHARACTERS[victim]["name"]}:evict:{msg}')
-                    await asyncio.sleep(3)
-                    ok, msg = await toggle_af(r, cid, CHARACTERS[cid], on=True)
-                    changed.append(f'{CHARACTERS[cid]["name"]}:swap-in:{msg}')
-                    await asyncio.sleep(3)
-                    break  # one swap per cycle is enough
+            # Refresh every char toward alive+in-zone+farming.
+            for cid in cid_list:
+                st = rest_state(r, cid)
+                if st is None:
+                    continue
+                target = CHAR_ZONE.get(cid, PARTY_ZONE)
+                if (st.get('hp') or 0) <= 0 or st.get('zone') != target or rest_af(r, cid) is not True:
+                    lines = await ensure_char_working(r, cid, cid_list, target)
+                    changed.extend(lines)
+                # reset backoff on healthy chars
+                if (st.get('hp') or 0) > 0 and rest_af(r, cid) is True:
+                    _fail[cid] = 0
+                    _farmer_started.setdefault(cid, time.time())
+                await asyncio.sleep(1)
+            # FAIR ROTATION: periodically swap an idle-but-healthy char into a
+            # farm slot so no one is permanently sidelined by the 2-farmer cap.
+            if time.time() - _last_rotation >= ROTATE_S:
+                lines = await rotate_slots(r, cid_list)
+                changed.extend(lines)
+                _last_rotation = time.time()
             if changed:
                 log('cycle ' + ' | '.join(changed))
             if time.time() - last_rate_log >= RATE_WINDOW_S:
