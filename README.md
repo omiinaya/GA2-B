@@ -25,15 +25,23 @@ server's built-in **auto-farm** mode.
 - **Monster seeding**: the server only spawns monsters for recent auto-farm activity. The agent pre-seeds on start (25s party window) and re-seeds on a timer.
 - **Rest system**: role-based HP/MP thresholds with force-exit from stale combat state and dynamic rest timeouts from measured regen.
 
-## Efficiency Status
+## Efficiency Status (production, 2026-08-05)
 
-| Mode | Gold/hr (Lv17-23, zone 44341 era) | Notes |
-|------|----------------------------------|-------|
-| Auto-farm (solo, server AI) | ~30,000 (very stable) | No WS dependency; auto-loot is server-side |
-| Manual AI (party of 3) | ~37,800 (session test: +15%) | Gold shared in party; healer mana management is the big win (+209% healer gold/min vs auto-farm) |
-| Manual AI (solo) | 0–23,500 | Solo manual gets no auto-loot — party mode is REQUIRED for income |
+**Current farm model:** persistent supervisor keeps all 3 chars alive + farming
+server-side auto-farm (AF persists after WS close). The server caps 2 concurrent
+farm slots, so the supervisor fair-rotates the 2 slots through all 3 chars every
+~5 min; rotated-out chars shelter in Gludios (safe city) at full HP.
 
-The project iterates on closing this gap with live 15-min H2H tests.
+| Char | Lv | Zone | Measured rate (2026-08-05) | Notes |
+|------|----|------|---------------------------|-------|
+| ShieldBot (warlord) | 26 | 64188 | **~54-80k/hr** (spikes 100k) | Mithril Greatsword p_atk 105 |
+| BuffBot (sorcerer) | 21 | 53 | ~16-26k/hr | Arcane Staff m_atk 55; was 0/hr (death spiral) |
+| HermesHeal (bishop) | 24 | 53 | ~3-9k/hr (rotating) | Heal-first rotation; shelters between turns |
+| **Combined** | | | **~80-120k/hr** | 2 of 3 farming at once |
+
+Key levers (measured order): class-appropriate weapon (2.5-5×) → survivable
+zone/armor → trained class skills (autoEnabled) → talisman (+3-6% stat) →
+quest claims. Details in `docs/PROGRESSION_RESEARCH.md`.
 
 ## Deployment
 
