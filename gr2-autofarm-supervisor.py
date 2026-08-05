@@ -43,6 +43,9 @@ LOG_FILE = os.path.expanduser('~/.hermes/gr2-autofarm-supervisor.log')
 STATE_FILE = os.path.expanduser('~/.hermes/gr2-autofarm-state.json')
 
 PARTY_ZONE = 64188      # Windy Meadow Gates (Lv21-24) — direct from Gludios 149
+SAFE_ZONE = 149          # Gludios city — safe resting spot for rotated-out chars
+                         # (a char left standing in a hunting zone with AF off is
+                         # monster bait — HermesHeal was killed this way 2026-08-05)
 CYCLE_S = int(os.environ.get('GR2_CYCLE', '60'))        # main loop cadence
 RATE_WINDOW_S = int(os.environ.get('GR2_RATE_WINDOW', '600'))  # gold-rate window
 
@@ -83,6 +86,11 @@ _running = True
 # TRANSIENT server errors, NOT for "the char is disposable."
 _fail = {cid: 0 for cid in CHARACTERS}
 _last_attempt = {cid: 0.0 for cid in CHARACTERS}
+# Char currently resting in the SAFE_ZONE after being rotated OUT of a farm
+# slot (2026-08-05 HermesHeal death fix). While sheltered, the ensure pass
+# MUST NOT drag it back to its zone — it's safely idle by design. rotate_slots
+# clears the flag when the char's turn comes up again.
+_sheltered = {}  # cid -> sheltered_since (ts)
 
 
 def log(msg):
@@ -350,6 +358,12 @@ async def ensure_char_working(rest, cid, cid_list, target_zone):
 
     # Alive but out of zone. Travel + toggle-AF under one paused slot, then restore.
     if st.get('zone') != target_zone:
+        # SAFETY (2026-08-05): a char sheltered in the safe city after being
+        # rotated OUT is idle BY DESIGN — do NOT drag it back to the hunting
+        # zone. rotate_slots brings it back when its turn comes up.
+        if cid in _sheltered:
+            out.append(f'{cfg["name"]}:sheltered (safe zone, rotation governs)')
+            return out
         victim = _free_slot_candidate(rest, cid_list, cid)
         if victim is not None:
             ok, msg = await toggle_af(rest, victim, CHARACTERS[victim], on=False)
@@ -451,11 +465,24 @@ def report_rates(snap):
 async def rotate_slots(rest, cid_list, target_zone=PARTY_ZONE):
     """Fair-rotation: if a char is alive+in-zone but AF-off (sidelined by the
     2-farmer cap), swap it into a slot by pausing the farmer that has been
-    farming the longest. Returns log lines."""
+    farming the longest. Returns log lines.
+
+    SAFETY (2026-08-05): a farmer paused while standing in the hunting zone is
+    monster bait — HermesHeal was repeatedly killed this way (rot-pause at
+    14:56 → dead by 15:00, standing idle in zone 53). Before pausing the
+    victim we FIRST travel it back to the safe city (Gludios 149) so it rests
+    safely while sidelined, and mark it _sheltered so the ensure pass doesn't
+    drag it back. The incoming char then takes the freed slot (its _sheltered
+    flag is cleared). Travel of the victim happens WHILE it still farms (no
+    slot needed for the victim's own WS); the slot is only freed by the pause
+    AFTER arrival.
+    """
     out = []
+    # Idle = alive, AF-off, and either in its hunting zone OR sheltered in the
+    # safe city (resting from a prior rotation — still eligible for its turn).
     idle = [c for c in cid_list
             if (rest_state(rest, c) or {}).get('hp', 0) > 0
-            and (rest_state(rest, c) or {}).get('zone') == CHAR_ZONE.get(c, target_zone)
+            and (rest_state(rest, c) or {}).get('zone') in (CHAR_ZONE.get(c, target_zone), SAFE_ZONE)
             and rest_af(rest, c) is not True]
     if not idle:
         return out  # everyone farming (or dead/out-of-zone handled elsewhere)
@@ -466,14 +493,40 @@ async def rotate_slots(rest, cid_list, target_zone=PARTY_ZONE):
     # who has farmed the longest (fair — no one hoards a slot forever).
     cid = idle[0]  # ORDER-ordered = lowest id first = BuffBot gets in first
     victim = max(farmers, key=lambda x: _farmer_started.get(x, 0) or 0)
-    ok, msg = await toggle_af(rest, victim, CHARACTERS[victim], on=False)
-    out.append(f'{CHARACTERS[victim]["name"]}:rot-pause:{msg}')
+    # SAFETY: move the victim to the safe city BEFORE pausing so it never
+    # stands idle in the hunting zone (HermesHeal death pattern 2026-08-05).
+    v_cfg = CHARACTERS[victim]
+    v_st = rest_state(rest, victim) or {}
+    if v_st.get('zone') != SAFE_ZONE:
+        # Travel while still farming — the victim's own WS is fine; only the
+        # 2-farmer cap matters and it's not being evicted (it's a farmer).
+        try:
+            ok_t, msg_t = await travel_to_zone(rest, victim, v_cfg, SAFE_ZONE)
+            out.append(f'{v_cfg["name"]}:rot-shelter:{msg_t}')
+            await asyncio.sleep(2)
+        except Exception as e:
+            out.append(f'{v_cfg["name"]}:rot-shelter-fail:{e}')
+    ok, msg = await toggle_af(rest, victim, v_cfg, on=False)
+    out.append(f'{v_cfg["name"]}:rot-pause:{msg}')
+    _sheltered[victim] = time.time()  # ensure pass must not drag it back
     await asyncio.sleep(3)
+    _sheltered.pop(cid, None)  # the incoming char is back in the rotation
+    # If the incoming char is resting in the safe city, travel it to its zone
+    # FIRST (AF-on in the city farms nothing / is wrong).
+    c_st = rest_state(rest, cid) or {}
+    if c_st.get('zone') == SAFE_ZONE:
+        try:
+            ok_t, msg_t = await travel_to_zone(rest, cid, CHARACTERS[cid],
+                                               CHAR_ZONE.get(cid, target_zone))
+            out.append(f'{CHARACTERS[cid]["name"]}:rot-travel:{msg_t}')
+            await asyncio.sleep(2)
+        except Exception as e:
+            out.append(f'{CHARACTERS[cid]["name"]}:rot-travel-fail:{e}')
     ok, msg = await toggle_af(rest, cid, CHARACTERS[cid], on=True)
     out.append(f'{CHARACTERS[cid]["name"]}:rot-in:{msg}')
     await asyncio.sleep(3)
-    # restart the "started" clock for the freshly-paused farmer (it just got the
-    # longest-farm time; the newly-swapped-in one starts fresh)
+    # The rotated-out char is now in the safe city — the ensure pass will
+    # travel it back when its slot comes around again.
     _farmer_started[victim] = 0
     _farmer_started[cid] = time.time()
     return out
