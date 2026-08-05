@@ -4305,7 +4305,16 @@ class CharacterAgent:
         the quest template's completionState field is NOT progress (verified
         2026-08-04: quest 3 showed completionState=11 but stageInfo.current=0/10
         right after accept; complete/claim correctly refused). Once a stage is
-        done, run complete→claim; treat errors as already-in-progress."""
+        done, run complete→claim; treat errors as already-in-progress.
+
+        CRITICAL (2026-08-05): multi-stage quests set awaitinRewardChoice=True
+        and stageInfo.current/target drops to None after their final stage.
+        They require CHAIN advance → complete → claim (the old complete→claim
+        alone 403s because the stage must advance first). This was found
+        manually unlocking talismanSlot1: quest 3 needed advance→complete→
+        claim. Detect claimable quests via stageInfo.current>=target OR
+        awaitingRewardChoice OR state>=2, and run the full chain.
+        """
         try:
             active, _ = self.fetch_quest_progress()
             claimed = 0
@@ -4315,20 +4324,22 @@ class CharacterAgent:
                 stage = entry.get('stageInfo', {}) or {}
                 current = stage.get('current') or 0
                 target = stage.get('target') or 0
-                if target <= 0 or current < target:
+                prog = entry.get('progress', {}) or {}
+                awaiting = prog.get('awaitingRewardChoice') is True
+                state = prog.get('state')
+                # Claimable when: stage done, OR awaiting reward choice, OR
+                # in state 2 (post-stage, awaiting advance/complete).
+                if not (awaiting or state == 2 or (target > 0 and current >= target)):
                     continue
-                self.analytics.log(f"[{self.name}] quest {q.get('name')} stage done "
-                                   f"({current}/{target}) — completing")
-                for action in ('complete', 'claim'):
+                self.analytics.log(f"[{self.name}] quest {q.get('name')} claimable "
+                                   f"(stage={current}/{target} awaiting={awaiting} state={state})")
+                for action in ('advance', 'complete', 'claim'):
                     try:
                         res = self.rest.post(f'/api/quests/{qid}/{action}', {
                             'characterId': self.char_id})
-                        if isinstance(res, dict):
-                            status = res.get('status', '')
-                            if status == 'ok':
-                                claimed += 1
-                                self.analytics.log(f"[{self.name}] ✅ quest {action}: {q.get('name')}")
-                                break
+                        if isinstance(res, dict) and res.get('status') == 'ok':
+                            claimed += 1
+                            self.analytics.log(f"[{self.name}] ✅ quest {action}: {q.get('name')}")
                     except Exception:
                         continue
             return claimed
