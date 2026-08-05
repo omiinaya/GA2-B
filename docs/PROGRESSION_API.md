@@ -120,3 +120,31 @@ is NOT progress.
   reached `target`.
 - `ASCEND_PREF` (gr2_data) — role-aware ascendancy class per char.
 - All wired into `_handle_game_state` first-connect path.
+## Warehouse (2026-08-05 — CORRECTED)
+| Method | Path | Notes |
+|--------|------|-------|
+| GET | `/api/warehouse/{npcId}/gold` | **ACCOUNT-SHARED** balance; `{npcId}` = warehouse NPC id (Gludios clerk = 1051), NOT characterId |
+| POST | `/api/warehouse/{npcId}/deposit-gold` | `{characterId, amount}` — works REMOTELY from hunting zones |
+| POST | `/api/warehouse/{npcId}/withdraw-gold` | `{characterId, amount}` — works REMOTELY |
+| GET | `/api/warehouse/{npcId}/items` | shared item vault (empty here) |
+
+⚠️ Early code used `/api/warehouse/{cid}/gold` (character id) — that returns
+None. The client JS (`ThreatMeter` WarehouseModal) passes the **warehouse NPC
+id** and the subtitle reads "Shared across all your characters". Verified live
+2026-08-05: deposit 223k (ShieldBot) → withdraw 200k (BuffBot) both ok from
+hunting zones.
+
+## Ascendancy / class change (2026-08-05 — verified live)
+| Method | Path | Notes |
+|--------|------|-------|
+| GET | `/api/ascendancy/options?characterId=` | 4 classes per base class, `minLevel: 20`, hp/mp gain at unlock |
+| POST | `/api/ascendancy/ascend` | `{characterId, ascendedClass}` — **works without completing quest 3!** |
+
+wizard → sorcerer/necromancer (mage), bishop/prophet (cleric)
+fighter → warlord/gladiator (warrior), paladin/dark_avenger (knight),
+hawkeye/treasure_hunter (rogue)
+Core class skills unlock at Lv20 (Fireball, Holy Bolt, Smite, Power Smash,
+Lightning Strike, Two Handed Weapon Master, ...) — trainable from trainer 9
+after ascension. Config skillIds differ from character skill ids (e.g. Robe
+Mastery config id 13299 ≠ char id 205); PUT full config with wrong id →
+403 "skill not in character config".
