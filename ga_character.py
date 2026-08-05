@@ -765,6 +765,11 @@ class CharacterAgent:
             if (self.gold or 0) > 100000:
                 self._auto_buy_best_weapon()
                 self.fetch_inventory()
+            # 2026-08-05: talismans are crafted 24h buffs (+3%/+6% class stat).
+            # Craft on connect when the slot is unlocked, gold is comfortable,
+            # and none is currently worn (daily upkeep, verified live).
+            if (self.gold or 0) > 250000:
+                self._auto_craft_talisman()
             # Upgrade armor from the shop if gold is comfortable (50% budget;
             # keeps crafting/training economy alive). 2026-08-04: ShieldBot was
             # farming in starter Leather (p_def 8) and dying — full Steel set
@@ -4110,6 +4115,77 @@ class CharacterAgent:
             return 1
         except Exception as e:
             self.analytics.log(f"[{self.name}] auto-buy weapon failed: {e}")
+            return 0
+
+    def _auto_craft_talisman(self, budget_floor=250000):
+        """Craft + equip the class-appropriate talisman (24h buff, +3%/+6% stat).
+
+        Discovery (2026-08-05, verified live): talismanSlot1Unlocked=True on
+        all 3 chars after claiming Trial of Ascendancy (quest 3). Talismans
+        are CRAFTED (not bought): Tier 1 = 100k gold + Magical Shard x1,
+        Tier 2 = 250k + Dark Crystal x1 + Magical Shard x1, Tier 3 = 1M +
+        Stone of Purity. They last 24h while equipped (instanceMetadata
+        remaining_seconds=86400) then drain — a daily upkeep buff.
+
+        Class stat mapping (from item effectJson): Sorcery=m_atk (casters),
+        Might=p_atk (physical), Life=max_hp, Iron=p_def, Warding=m_def,
+        Wisdom=max_mp, Restoration=regen. This crafts the highest affordable
+        tier of the class stat, only when the slot is unlocked, no talisman
+        is currently equipped, and gold exceeds the floor (so the farm
+        economy isn't starved — crafting runs at connect).
+
+        Verified flow: POST /api/crafting/craft {characterId, recipeId,
+        quantity} works REMOTELY from a hunting zone → item lands in bag →
+        POST /api/inventory/{cid}/equip {inventoryId} → 24h buff active.
+        """
+        try:
+            st = self.rest.get(f'/api/game/state/{self.char_id}')
+            char = (st or {}).get('character') or {}
+            if not char.get('talismanSlot1Unlocked'):
+                return 0
+            self.fetch_inventory()
+            for it in self.equipped_gear or []:
+                if (it.get('equippedSlot') or it.get('itemSlot')) == 'talisman_1':
+                    return 0  # already wearing one
+            if (self.gold or 0) < budget_floor:
+                return 0
+            CASTER = {'wizard', 'cleric', 'mage', 'sorcerer', 'bishop',
+                      'necromancer', 'prophet', 'spellsinger', 'elder',
+                      'warcryer', 'spell_howler', 'twilight_elder',
+                      'earth_lord', 'swordsinger', 'plains_walker',
+                      'silver_ranger', 'temple_knight'}
+            is_caster = getattr(self, 'char_class', '') in CASTER
+            stat_name = 'Sorcery' if is_caster else 'Might'
+            # Choose highest affordable tier: T2 (250k, +6%) if rich, else T1.
+            tier = 2 if (self.gold or 0) >= budget_floor + 150000 else 1
+            recipes = self.rest.get('/api/crafting/recipes') or []
+            target = None
+            for rec in recipes:
+                nm = rec.get('resultItemName') or ''
+                if nm == f'Talisman of {stat_name} - Tier {tier}':
+                    target = rec
+                    break
+            if not target:
+                return 0
+            res = self.rest.post('/api/crafting/craft', {
+                'characterId': self.char_id,
+                'recipeId': target.get('id'),
+                'quantity': 1})
+            if not (isinstance(res, dict) and res.get('resultItemName')):
+                self.analytics.log(f"[{self.name}] talisman craft failed: {res}")
+                return 0
+            self.gold = res.get('newGold', self.gold)
+            self.fetch_inventory()
+            for bag_it in self.inventory or []:
+                if (bag_it.get('itemName') == f'Talisman of {stat_name} - Tier {tier}'
+                        and not bag_it.get('equipped')):
+                    eq = self.equip_item(bag_it.get('id'))
+                    self.analytics.log(f"[{self.name}] 🧿 Equipped {bag_it.get('itemName')} "
+                                       f"(+{3 if tier == 1 else 6}% {stat_name.lower()}, 24h) {eq}")
+                    break
+            return 1
+        except Exception as e:
+            self.analytics.log(f"[{self.name}] auto-talisman failed: {e}")
             return 0
 
     def fetch_quest_progress(self):
