@@ -440,6 +440,38 @@ def record_gold(snap):
     now = time.time()
     for cid, info in snap.items():
         _gold_history.setdefault(cid, deque(maxlen=400)).append((now, info.get('gold') or 0))
+    # Durable telemetry: persist to the shared DB (gold_history table) so
+    # gold rates survive restarts and the dashboard/analytics can chart them.
+    # Throttled to ~once/5min by the caller's cadence (record_gold is called
+    # each cycle); each write is one row per char.
+    try:
+        db = _gold_db()
+        rows = [(int(cid), now, int(info.get('gold') or 0)) for cid, info in snap.items()]
+        db.executemany('INSERT INTO gold_history (char_id, timestamp, gold) VALUES (?,?,?)', rows)
+        db.commit()
+    except Exception:
+        pass  # telemetry is best-effort; never break the farm loop
+
+
+_gold_db_conn = None
+
+
+def _gold_db():
+    """Lazy single sqlite connection for gold telemetry (reopened if dropped)."""
+    global _gold_db_conn
+    try:
+        if _gold_db_conn is None:
+            import sqlite3
+            from ga_config import DB_PATH
+            _gold_db_conn = sqlite3.connect(DB_PATH, timeout=5)
+            _gold_db_conn.execute(
+                'CREATE TABLE IF NOT EXISTS gold_history ('
+                'id INTEGER PRIMARY KEY AUTOINCREMENT, char_id INTEGER NOT NULL, '
+                'timestamp REAL NOT NULL, gold INTEGER NOT NULL)')
+        return _gold_db_conn
+    except Exception:
+        _gold_db_conn = None
+        raise
 
 
 def report_rates(snap):
