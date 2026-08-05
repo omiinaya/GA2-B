@@ -755,6 +755,11 @@ class CharacterAgent:
             # connect (2026-08-04 progression wiring — cheap high-ROI upgrades).
             self._auto_train_skills()
             self._claim_completed_quests()
+            # 2026-08-05: buy the best class weapon from the shop (remote buy
+            # works — no city gate) so ascended casters don't farm with swords.
+            if (self.gold or 0) > 100000:
+                self._auto_buy_best_weapon()
+                self.fetch_inventory()
             # Upgrade armor from the shop if gold is comfortable (50% budget;
             # keeps crafting/training economy alive). 2026-08-04: ShieldBot was
             # farming in starter Leather (p_def 8) and dying — full Steel set
@@ -3781,7 +3786,18 @@ class CharacterAgent:
             inv = self.fetch_inventory()
             if not isinstance(inv, dict):
                 return None
-            stat_idx = 1 if getattr(self, 'char_class', '') == 'wizard' else 0
+            # Ascendancy-aware stat selection: ALL caster classes scale off
+            # m_atk; physical classes scale off p_atk. Before ascension the
+            # class is wizard/fighter; after ascension it becomes sorcerer/
+            # bishop/necromancer/prophet (m_atk) or warlord/paladin/gladiator/
+            # dark_avenger/hawkeye/treasure_hunter (p_atk). Using only
+            # 'wizard' here left ascended casters equipping swords (2026-08-05).
+            CASTER_CLASSES = {'wizard', 'cleric', 'mage', 'sorcerer', 'bishop',
+                              'necromancer', 'prophet', 'spellsinger', 'elder',
+                              'warcryer', 'spell_howler', 'twilight_elder',
+                              'earth_lord', 'swordsinger', 'plains_walker',
+                              'silver_ranger', 'temple_knight'}
+            stat_idx = 1 if getattr(self, 'char_class', '') in CASTER_CLASSES else 0
             cur_items = inv.get('equipped', []) or []
             cur_best = 0
             for it in cur_items:
@@ -3956,6 +3972,86 @@ class CharacterAgent:
             return bought
         except Exception as e:
             self.analytics.log(f"[{self.name}] auto-buy gear failed: {e}")
+            return 0
+
+    def _auto_buy_best_weapon(self, shop_npc_id=None, budget_pct=0.4):
+        """Buy the best affordable weapon for the character's class.
+
+        The gear-upgrade flow previously skipped weapons entirely (bag-drops
+        only), which left ascended casters (sorcerer/bishop) wielding swords.
+        2026-08-05: shop-buy works REMOTELY (no city proximity gate) — verified
+        POST /api/shop/8/buy from a hunting zone. This method buys the top
+        weapon from the shop whose class stat (m_atk for casters, p_atk for
+        physical) beats the equipped one, within a gold budget, then equips it.
+        """
+        try:
+            npc = shop_npc_id or getattr(self, 'shop_npc_id', 8)
+            inv = self.fetch_shop_inventory(npc)
+            if not inv:
+                return 0
+            CASTER = {'wizard', 'cleric', 'mage', 'sorcerer', 'bishop',
+                      'necromancer', 'prophet', 'spellsinger', 'elder',
+                      'warcryer', 'spell_howler', 'twilight_elder',
+                      'earth_lord', 'swordsinger', 'plains_walker',
+                      'silver_ranger', 'temple_knight'}
+            is_caster = getattr(self, 'char_class', '') in CASTER
+            stat_key = 'm_atk' if is_caster else 'p_atk'
+            self.fetch_inventory()
+            cur_best = 0
+            for it in self.equipped_gear or []:
+                stats = {}
+                raw = it.get('statsJson') or it.get('stats') or {}
+                if isinstance(raw, str):
+                    try:
+                        stats = json.loads(raw)
+                    except Exception:
+                        stats = {}
+                elif isinstance(raw, dict):
+                    stats = raw
+                cur_best = max(cur_best, stats.get(stat_key) or 0)
+            budget = int((self.gold or 0) * budget_pct)
+            best_item, best_val = None, cur_best
+            for it in inv:
+                if (it.get('slot') or '') != 'main_hand':
+                    continue
+                stats = {}
+                raw = it.get('statsJson') or it.get('stats') or {}
+                if isinstance(raw, str):
+                    try:
+                        stats = json.loads(raw)
+                    except Exception:
+                        stats = {}
+                elif isinstance(raw, dict):
+                    stats = raw
+                val = stats.get(stat_key) or 0
+                if val <= best_val:
+                    continue
+                price = it.get('buyPrice') or it.get('baseBuyPrice') or 0
+                if price <= 0 or price > budget:
+                    continue
+                if (self.level or 0) < (it.get('levelRequired') or 0):
+                    continue
+                best_item, best_val = it, val
+            if best_item is None:
+                return 0
+            res = self.rest.post(f'/api/shop/{npc}/buy', {
+                'characterId': self.char_id,
+                'itemId': best_item.get('itemId'),
+                'quantity': 1})
+            if not (isinstance(res, dict) and res.get('status') == 'ok'):
+                return 0
+            self.gold = max(0, (self.gold or 0) - (best_item.get('buyPrice') or 0))
+            self.analytics.log(f"[{self.name}] 🛒 Bought weapon {best_item.get('name')} "
+                               f"({stat_key}={best_val}) — was {cur_best}")
+            self.fetch_inventory()
+            for bag_it in self.inventory or []:
+                if (bag_it.get('itemName') == best_item.get('name')
+                        and not bag_it.get('equipped')):
+                    self.equip_item(bag_it.get('id'))
+                    break
+            return 1
+        except Exception as e:
+            self.analytics.log(f"[{self.name}] auto-buy weapon failed: {e}")
             return 0
 
     def fetch_quest_progress(self):
