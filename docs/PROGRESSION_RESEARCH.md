@@ -111,3 +111,16 @@ Deep-dive results from client JS (`/tmp/gr2chunks/`) + live API probes.
   both return {tokenBalance: 0, items: [...]}. Items need clan-ritual /
   olympiad PvP tokens, NOT gold — no path to earn them in the farm loop.
 - Olympiad has Enchant Weapon/Armor Scrolls (would be huge) but token-gated.
+
+### Continuous gold pooling (2026-08-05 16:50, verified live)
+- Connect-level `_auto_pool_gold()` misses the PERMANENT farmer — BuffBot
+  holds one of the 2 farm slots permanently (rotation only swaps the 3rd
+  between HermesHeal and ShieldBot), so his connect never fires.
+- Supervisor-level `pool_gold_cycle()` runs every GR2_POOL (default 300s)
+  and balances ALL chars through the shared warehouse (NPC 1051):
+  - gold > 80k keep  -> deposit surplus
+  - gold < 80k keep  -> withdraw up to 150k fill (pool >= 10k min)
+- Verified live: BuffBot 61,753 -> 150,387 (funded for Fireball Lv2 150k +
+  Magic Mastery 60k at Lv24/25), ShieldBot 126,890 -> 80,000 (deposited),
+  HermesHeal 24,154 -> 65,827, warehouse 129,050 -> 6,003. Pool fully
+  redistributed. Gold economy is now self-balancing.
