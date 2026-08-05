@@ -70,10 +70,12 @@ cp gr2-brain.py         ~/.hermes/scripts/gr2-brain.py
    # cron job: every 15m, no_agent, script=gr2-watchdog.py, deliver=origin
    ```
 
-3. Sync the runtime copies from the repo:
+3. Sync the runtime copies from the repo — use the helper (plain `cp` can
+   truncate the destination to 0 bytes when the shell times out mid-copy;
+   observed twice 2026-08-05). `--verify` diffs every file back:
    ```bash
-   for f in ga_*.py gr2-*.py grimeage_agent.py; do cp "$f" ~/.hermes/scripts/; done
-   # then: su-run 'systemctl restart gr2-autofarm-supervisor.service'
+   python3 sync-runtime.py --verify   # repo -> ~/.hermes/scripts, then verify
+   su-run 'systemctl restart gr2-autofarm-supervisor.service'
    ```
 
 Credentials (never committed): `GR2_EMAIL` / `GR2_PASSWORD` env vars, or a
