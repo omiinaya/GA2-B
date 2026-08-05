@@ -3821,7 +3821,15 @@ class CharacterAgent:
                               'warcryer', 'spell_howler', 'twilight_elder',
                               'earth_lord', 'swordsinger', 'plains_walker',
                               'silver_ranger', 'temple_knight'}
-            stat_idx = 1 if getattr(self, 'char_class', '') in CASTER_CLASSES else 0
+            # Authoritative class: prefer the REST-reported class (the local
+            # char_class can be stale on first connect before game_state).
+            try:
+                cd = self.rest.get(f'/api/characters/{self.char_id}')
+                rest_class = (cd or {}).get('class') or ''
+            except Exception:
+                rest_class = ''
+            cls = rest_class or getattr(self, 'char_class', '')
+            stat_idx = 1 if cls in CASTER_CLASSES else 0
             cur_items = inv.get('equipped', []) or []
             cur_best = 0
             for it in cur_items:
@@ -4072,7 +4080,14 @@ class CharacterAgent:
                       'warcryer', 'spell_howler', 'twilight_elder',
                       'earth_lord', 'swordsinger', 'plains_walker',
                       'silver_ranger', 'temple_knight'}
-            is_caster = getattr(self, 'char_class', '') in CASTER
+            # Authoritative class: prefer REST (local char_class can be stale
+            # before game_state — same fix as _auto_equip_best_weapon).
+            try:
+                cd = self.rest.get(f'/api/characters/{self.char_id}')
+                rest_class = (cd or {}).get('class') or ''
+            except Exception:
+                rest_class = ''
+            is_caster = (rest_class or getattr(self, 'char_class', '')) in CASTER
             stat_key = 'm_atk' if is_caster else 'p_atk'
             self.fetch_inventory()
             cur_best = 0
