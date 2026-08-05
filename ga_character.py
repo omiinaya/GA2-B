@@ -751,6 +751,12 @@ class CharacterAgent:
             # included in the rotation when a qualifying weapon is equipped.
             self._auto_equip_best_weapon()
             self.fetch_inventory()  # refresh after equip
+            # 2026-08-05: continuous gold pooling — deposit surplus to the
+            # shared warehouse / withdraw if broke, so training + crafting
+            # floors are met for every char (BuffBot needs 150k+ at Lv25).
+            # MUST run BEFORE _auto_train_skills so affordability sees the
+            # pooled gold (a broke char pulls from the pool first).
+            self._auto_pool_gold()
             # Train affordable skills + claim completed quest rewards once at
             # connect (2026-08-04 progression wiring — cheap high-ROI upgrades).
             self._auto_train_skills()
@@ -759,11 +765,6 @@ class CharacterAgent:
             # actually uses Fireball/Smite/Power Smash (BuffBot farmed without
             # Touch of Flame power-80 until this was added).
             self._auto_enable_class_skills()
-            # 2026-08-05: continuous gold pooling — deposit surplus to the
-            # shared warehouse / withdraw if broke, so training + crafting
-            # floors are met for every char (BuffBot needs 150k+ at Lv25).
-            # Runs BEFORE _auto_train_skills so affordability uses pooled gold.
-            self._auto_pool_gold()
             self._auto_accept_quests()
             self._claim_completed_quests()
             # 2026-08-05: buy the best class weapon from the shop (remote buy
