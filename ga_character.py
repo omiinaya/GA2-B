@@ -759,6 +759,7 @@ class CharacterAgent:
             # actually uses Fireball/Smite/Power Smash (BuffBot farmed without
             # Touch of Flame power-80 until this was added).
             self._auto_enable_class_skills()
+            self._auto_accept_quests()
             self._claim_completed_quests()
             # 2026-08-05: buy the best class weapon from the shop (remote buy
             # works — no city gate) so ascended casters don't farm with swords.
@@ -4298,6 +4299,43 @@ class CharacterAgent:
         available = self.fetch_available_quests() or []
         return active, available
 
+    def _auto_accept_quests(self):
+        """Accept available quests within level range so they progress passively
+        during auto-farming (kill/gold objective quests complete while farming
+        — exactly how Trial of Ascendancy farmed its 10 Scout kills 2026-08-04).
+
+        Skips quests whose minLevel exceeds the char's level, and skip flags
+        (ignored). Some quests are party-gated ([PARTY]) — skip those. Returns
+        the count accepted.
+        """
+        try:
+            available = self.fetch_available_quests() or []
+            accepted = 0
+            for entry in available:
+                q = entry if isinstance(entry, dict) and 'id' in entry else (entry.get('quest') or {})
+                qid = q.get('id')
+                name = q.get('name') or '?'
+                # Level gate
+                min_lv = q.get('minLevel') or 0
+                if (self.level or 0) < min_lv:
+                    continue
+                # Skip party-gated quests (require 2+ chars in a party; the
+                # 2-farmer server cap prevents party formation).
+                if '[PARTY]' in str(name):
+                    continue
+                # Skip explicitly-ignored quests.
+                if q.get('ignored'):
+                    continue
+                res = self.rest.post(f'/api/quests/{qid}/accept', {
+                    'characterId': self.char_id})
+                if isinstance(res, dict) and res.get('status') == 'ok':
+                    accepted += 1
+                    self.analytics.log(f"[{self.name}] 📜 Accepted quest: {name}")
+            return accepted
+        except Exception as e:
+            self.analytics.log(f"[{self.name}] auto-accept quests failed: {e}")
+            return 0
+
     def _claim_completed_quests(self):
         """Claim any quest whose stage progress has reached its target.
 
@@ -4458,21 +4496,22 @@ class CharacterAgent:
             'characterId': self.char_id })
 
     
-    def warehouse_gold(self):
-        '''Check warehouse gold balance.'''
-        data = self.rest.get(f'''/api/warehouse/{self.char_id}/gold''')
+    def warehouse_gold(self, npc_id=1051):
+        '''Check warehouse gold balance (ACCOUNT-SHARED, keyed by warehouse NPC id
+        1051 = Gludios clerk — NOT characterId; corrected 2026-08-05).'''
+        data = self.rest.get(f'''/api/warehouse/{npc_id}/gold''')
         if isinstance(data, dict):
             return data.get('gold', 0)
 
     
-    def warehouse_deposit_gold(self, amount=None):
-        return self.rest.post(f'''/api/warehouse/{self.char_id}/deposit-gold''', {
+    def warehouse_deposit_gold(self, amount=None, npc_id=1051):
+        return self.rest.post(f'''/api/warehouse/{npc_id}/deposit-gold''', {
             'characterId': self.char_id,
             'amount': amount })
 
     
-    def warehouse_withdraw_gold(self, amount=None):
-        return self.rest.post(f'''/api/warehouse/{self.char_id}/withdraw-gold''', {
+    def warehouse_withdraw_gold(self, amount=None, npc_id=1051):
+        return self.rest.post(f'''/api/warehouse/{npc_id}/withdraw-gold''', {
             'characterId': self.char_id,
             'amount': amount })
 
