@@ -209,6 +209,56 @@ def test_pool_surplus_balanced_no_op():
     assert not any('warehouse/1051' in c[1] and c[0] == 'POST' for c in rest.calls)
 
 
+# --- _auto_equip_best_weapon (class detection) ---------------
+
+def test_equip_uses_authoritative_rest_class_over_stale_local():
+    # Local char_class is stale/empty (first connect before game_state), but
+    # REST reports the real class = sorcerer. Must pick m_atk (Arcane Staff)
+    # over the p_atk Stiletto. Regression: mis-detection put the Stiletto
+    # (m_atk 36) over the Arcane Staff (m_atk 55) — a 53% m_atk loss.
+    a, rest = _agent()
+    a.char_class = ''          # force stale/empty local class
+    rest.responses['/api/characters/1069'] = {'class': 'sorcerer', 'level': 22}
+    rest.responses['/api/inventory/1069'] = {
+        'equipped': [{'itemSlot': 'main_hand', 'itemName': 'Mithril Stiletto'}],
+        'bag': [
+            {'id': 87, 'itemName': 'Arcane Staff', 'itemType': 'weapon',
+             'statsJson': '{"m_atk": 55, "p_atk": 44}'},
+        ],
+    }
+    a._auto_equip_best_weapon()
+    post = [p for m, p in rest.calls if m == 'POST']
+    assert any('equip' in p for p in post), f'expected an equip call, got {post}'
+
+
+def test_equip_falls_back_to_local_class_if_rest_empty():
+    # REST returns nothing; use local char_class = sorcerer (caster) -> m_atk.
+    a, rest = _agent()
+    rest.responses['/api/characters/1069'] = {}   # empty detail
+    rest.responses['/api/inventory/1069'] = {
+        'bag': [{'id': 5, 'itemName': 'Arcane Staff', 'itemType': 'weapon',
+                 'itemSlot': 'main_hand',
+                 'statsJson': {'m_atk': 55, 'p_atk': 44}}],
+    }
+    a._auto_equip_best_weapon()
+    post = [p for (m, p) in rest.calls if m == 'POST']
+    assert any('equip' in p for p in post)
+
+
+def test_equip_keeps_arcane_staff_when_equipped_and_bag_has_nothing_better():
+    # Already wearing the best m_atk weapon -> no equip call (no downgrade).
+    a, rest = _agent()
+    rest.responses['/api/characters/1069'] = {'class': 'sorcerer'}
+    rest.responses['/api/inventory/1069'] = {
+        'equipped': [{'itemSlot': 'main_hand', 'itemName': 'Arcane Staff',
+                      'statsJson': {'m_atk': 55}}],
+        'bag': [],
+    }
+    a._auto_equip_best_weapon()
+    post = [p for (m, p) in rest.calls if m == 'POST']
+    assert not any('equip' in p for p in post)
+
+
 # --- _auto_craft_talisman ------------------------------------
 
 def test_talisman_craft_skips_when_already_equipped():
